@@ -20,6 +20,7 @@ import {
   readCookie,
   saveCookie,
   forgetCookie,
+  pruneSessions,
 } from './lib/lanhu-dds.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -99,7 +100,12 @@ const BUILD_PARAMS = {
     },
     out: {
       type: 'string',
-      description: '产物子目录名（只一层，默认 <设计图名>-<id8>）。根目录固定为 ~/.dsh-lanhu-dds，不接受路径与 ..。',
+      description:
+        '产物子目录名（只一层，默认 <设计图名>-<id8>）。落在 ~/.dsh-lanhu-dds/sessions/<会话>/ 下，不接受路径与 ..。',
+    },
+    session: {
+      type: 'string',
+      description: '会话目录名。默认取当前 DSH 会话 id（每次对话各自隔离）；一般不用填，只在要跨会话复用产物时指定。',
     },
     scale: { type: 'number', description: '强制缩放比（1/2/3）。默认按屏宽自动推断。' },
     unit: {
@@ -146,12 +152,12 @@ export function createScreensTool() {
       '照设计稿写代码前先调用它选屏，不要跳过。缺 Cookie 时返回 missing-cookie 与获取方法——此时停下来问用户，不要自行编造。',
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
-    async execute(args) {
+    async execute(args, exec) {
       const given = typeof args.cookie === 'string' ? args.cookie.trim() : ''
       const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
       try {
-        const r = await buildDesign({ url: args.url, cookie, list: true })
+        const r = await buildDesign({ url: args.url, cookie, exec, list: true })
         const saved = given ? saveCookie(given) : null
         return {
           ok: true,
@@ -176,6 +182,8 @@ const DOCTOR_PARAMS = {
     ui: { type: 'boolean', description: '扫内网 UI 库，把真实组件清单写到 .agents/skills/lanhu-dds-codegen/ui-library.md。' },
     pkg: { type: 'string', description: '内网 UI 库包名；不填则用 doctor 自动识别的第一个。' },
     forget: { type: 'boolean', description: '删除已保存的蓝湖 Cookie（换号或排查 Cookie 问题时用）。' },
+    prune: { type: 'boolean', description: '清掉超过 days 天没动的会话目录（产物 + 临时脚本），不动 Cookie。' },
+    days: { type: 'number', description: 'prune 的天数阈值，默认 7。' },
   },
 }
 
@@ -191,6 +199,7 @@ export function createDoctorTool() {
     async execute(args) {
       const dir = args.project ?? process.cwd()
       if (args.forget) return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
+      if (args.prune) return { ok: true, ...pruneSessions({ days: args.days ?? 7 }), hint: '已清掉超期会话目录；Cookie 不受影响' }
       if (args.init) {
         const r = initProjectRules(dir)
         return r.ok ? { ok: true, ...r, hint: '把真实技术栈/目录/token/组件库填进去，填完再跑一次本工具直到 ready:true' } : { ok: false, ...r }
@@ -220,7 +229,7 @@ export function createBuildTool() {
       '组件切分大纲、设计 token、体检报告，并把切图下载到本地。纯 Node 实现，不需要浏览器或 Python。',
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
-    async execute(args) {
+    async execute(args, exec) {
       const given = typeof args.cookie === 'string' ? args.cookie.trim() : ''
       const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
@@ -228,7 +237,8 @@ export function createBuildTool() {
         const r = await buildDesign({
           url: args.url,
           cookie,
-          root: process.cwd(),
+          exec,
+          session: args.session,
           out: args.out,
           screens: args.screens ?? 'all',
           scale: args.scale,

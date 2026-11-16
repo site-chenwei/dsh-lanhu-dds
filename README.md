@@ -108,17 +108,18 @@ lanhu_dds_doctor({ forget: true })
 
 ## 中间产物放哪
 
-产物全部落在 **`~/.dsh-lanhu-dds/`**（换个 `DSH_LANHU_DDS_HOME` 也行），不进项目：
+按会话隔离，全部在 **`~/.dsh-lanhu-dds/`**（`DSH_LANHU_DDS_HOME` 可改根），不进项目：
 
 ```
 ~/.dsh-lanhu-dds/
-├── cookie                      # 蓝湖登录态（0600，验证通过才写）
-├── tmp/                        # 临时脚本放这，别放项目里
-└── 我的订单-4a3b8460/           # 一张设计图一个目录，重跑先清空再写
-    ├── screen-0.png
-    ├── screen-0.ir.json
-    ├── ...
+├── cookie                          # 蓝湖登录态（0600，验证通过才写），跨会话共用
+└── sessions/
+    └── <会话标识>/                  # 插件取当前 DSH 会话 id 前 12 位；命令行取时间戳
+        ├── tmp/                    # 本次会话的临时脚本
+        └── 我的订单-4a3b8460/       # 本次会话的产物，重跑先清空再写
 ```
+
+两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`（命令行 `--session`）。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
 
 `out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。产物不在项目里，**不需要 gitignore**。
 

@@ -58,7 +58,21 @@ node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build \
   --url "<蓝湖链接>" --screen 0
 ```
 
-**产物目录固定，不要自己造**：默认落到 `~/.dsh-lanhu-dds/<设计图名>-<id8>/`（可用 `DSH_LANHU_DDS_HOME` 改根），同一页重跑先清空再写。`--out` / `out` 只接受**一层目录名**（如 `订单列表`），带斜杠或 `..` 一律拒绝。**产物本身不进项目**——它是可重新生成的证据，不是源码。
+**产物按会话隔离，位置固定，不要自己造**：
+
+```
+~/.dsh-lanhu-dds/                 # DSH_LANHU_DDS_HOME 可改根
+├── cookie                        # 唯一一份，跨会话共用
+└── sessions/
+    └── <会话标识>/                # 插件自动取当前 DSH 会话 id（前 12 位）；命令行取时间戳
+        ├── tmp/                  # 本次会话的临时脚本
+        └── <设计图名>-<id8>/      # 本次会话的产物，重跑先清空再写
+```
+
+- 两次对话的产物互不覆盖，也不堆在根目录下。工具返回里带 `session` 和 `tmpDir`，要落临时脚本就用返回的 `tmpDir`，别自己拼路径。
+- `--out` / `out` 只接受**一层目录名**（如 `订单列表`），带斜杠或 `..` 一律拒绝。
+- `--session <名>` / `session` 参数只在**要跨会话复用同一份产物**时用，平时不要填。
+- 产物不进项目——它是可重新生成的证据，不是源码。
 
 **项目里该写什么，分两类**：
 
@@ -68,7 +82,7 @@ node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build \
 | `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单，库升级重生成 | 临时脚本：`.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、根目录 `dump-*.json` |
 | 你要交付的业务代码 | 猜出来的中间态文件（`tmp`、`scratch`、`test2.js`） |
 
-要读 IR/rects 就直接 `jq`、`node -e`、`cat`，不用落脚本；确实需要一个临时脚本时写到 `~/.dsh-lanhu-dds/tmp/`。`lanhu_dds_doctor` 会把不该写的扫出来（返回 `strays`）。
+要读 IR/rects 就直接 `jq`、`node -e`、`cat`，不用落脚本；确实需要一个临时脚本时写到**当前会话的** `~/.dsh-lanhu-dds/sessions/<会话>/tmp/`（父目录里就有，别再往下堆）。`lanhu_dds_doctor` 会把不该写的扫出来（返回 `strays`）。
 
 产物（每屏一套）：
 
@@ -260,7 +274,7 @@ console.table(bad);
 4. **引用了蓝湖 CDN 图片地址**：会过期，必须用 `assets/` 里的本地文件。
 5. **跳过第 5 步**：产出和项目代码风格格格不入，评审直接打回。
 6. **一次性生成整页巨型组件**：先按 outline 拆，再填内容。
-7. **把污染源当交付**：`.agents/tmp/dump-ir.mjs`、`design/dds/`、根目录 `dump-*.json` 都不该出现。产物在 `~/.dsh-lanhu-dds`，临时脚本在 `~/.dsh-lanhu-dds/tmp`；项目里只留 `project-rules.md`、`ui-library.md` 和业务代码。
+7. **把污染源当交付**：`.agents/tmp/dump-ir.mjs`、`design/dds/`、根目录 `dump-*.json` 都不该出现。产物和临时脚本都在 `~/.dsh-lanhu-dds/sessions/<会话>/`；项目里只留 `project-rules.md`、`ui-library.md` 和业务代码。
 8. **凭包名猜 UI 组件 API**：`ui-library.md` 里 props 是空的就停下问用户要（或读源码），不要按 Vant 的名字硬套内网库。
 9. **把 `&nbsp;` 当真文本**：DDS 的文案里有 HTML 实体，脚本已经解码过，别再手动转一次。
 

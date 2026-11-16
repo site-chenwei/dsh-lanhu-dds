@@ -87,7 +87,7 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 - `.agents/skills/lanhu-dds-codegen/project-rules.md` —— 本文
 - `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单（`doctor --ui` 生成，库升级后重跑）
 
-**产物不进项目**：裁图 / IR / 几何表 / 参考 HTML / 切图 / Cookie 全在 `~/.dsh-lanhu-dds/`（`DSH_LANHU_DDS_HOME` 可改根），所以不需要 gitignore 任何东西。
+**产物不进项目**：`~/.dsh-lanhu-dds/sessions/<会话>/` 下按会话隔离放裁图 / IR / 几何表 / 参考 HTML / 切图；Cookie 在 `~/.dsh-lanhu-dds/cookie`（`DSH_LANHU_DDS_HOME` 可改根）。所以不需要 gitignore 任何东西。
 
 **项目里不允许出现**（`doctor` 会扫出来报 `strays`）：
 
@@ -97,7 +97,7 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 | 临时脚本 | `.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、`scratch/`、`tmp/` |
 | 手搓的中间态 | 根目录 `dump-*.json`、`test2.js` |
 
-要读 IR 就 `jq` / `node -e` / `cat`；确实需要一个临时脚本，写到 `~/.dsh-lanhu-dds/tmp/`。
+要读 IR 就 `jq` / `node -e` / `cat`；确实需要一个临时脚本，写到当前会话的 `~/.dsh-lanhu-dds/sessions/<会话>/tmp/`。会话目录堆积用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清。
 
 ## 4. 字体
 
