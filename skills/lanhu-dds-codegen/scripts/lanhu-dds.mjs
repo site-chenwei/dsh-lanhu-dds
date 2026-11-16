@@ -743,6 +743,7 @@ function buildReport({ meta, screens, compiledList, groupsByScreen, assetStats, 
     if (assetStats.cdn) parts.push(`CDN 直下 ${assetStats.cdn}`)
     if (assetStats.alipic) parts.push(`alipic 镜像 ${assetStats.alipic}`)
     if (assetStats.cropped) parts.push(`reference.png 无遮挡裁切 ${assetStats.cropped}`)
+    if (assetStats.compositeIcons) parts.push(`组合小图标预裁 ${assetStats.compositeIcons}`)
     if (assetStats.placeholders) parts.push(`需占位 ${assetStats.placeholders}（CDN 不可达且有文字叠加，勿用 curl 重试）`)
     L.push(`- 切图资源：${parts.join('，')}`)
   }
@@ -959,10 +960,17 @@ export function specMarkdown(compiled, groups, { title = '', unit = 'design' } =
       if (c.textAlign && c.textAlign !== 'left') tokens.push(`ta:${c.textAlign}`)
     }
 
+    if (b.compositeAsset?.file) {
+      tokens.push(`composite-icon:${b.compositeAsset.file}(${b.compositeAsset.pxWidth}×${b.compositeAsset.pxHeight}px)[组合碎片小图标：优先换图标库，或直接用此预裁整图，禁手写裁图脚本]`)
+    } else if (b.compositeHint) {
+      tokens.push('[组合碎片小图标：优先换图标库或语义占位，禁手写裁图脚本]')
+    }
+
     if (b.asset?.status === 'ok') {
+      const pxNote = b.asset.pxWidth && b.asset.pxHeight ? `(${b.asset.pxWidth}×${b.asset.pxHeight}px)` : ''
       const iconHint = sr.w <= 64 && sr.h <= 64 && !b.kids.length ? '[图标候选]' : ''
       const srcNote = b.asset.source === 'cropped-from-reference' ? '(原图裁切)' : ''
-      tokens.push(`img:${b.asset.file}${srcNote}${iconHint}`)
+      tokens.push(`img:${b.asset.file}${pxNote}${srcNote}${iconHint}`)
     } else if (b.asset?.status === 'placeholder') {
       tokens.push(`img:PLACEHOLDER(${sr.w}×${sr.h},文字叠加背景)`)
     }
@@ -1089,11 +1097,77 @@ function overlapsText(raw, textRects) {
   return false
 }
 
+/** 纯 Node 读取常见光栅图片（PNG/GIF/WebP/JPEG）文件头真实像素宽高，避免模型手写 System.Drawing 脚本查尺寸。 */
+export function imageDimensions(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 10) return null
+  // PNG: 89 50 4E 47 0D 0A 1A 0A + IHDR(width@16, height@20)
+  if (buf.length >= 24 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) }
+  }
+  // GIF87a / GIF89a
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+    return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) }
+  }
+  // RIFF....WEBP
+  if (buf.length >= 30 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    const chunk = buf.toString('ascii', 12, 16)
+    if (chunk === 'VP8 ') {
+      return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff }
+    }
+    if (chunk === 'VP8L') {
+      const bits = buf.readUInt32LE(21)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+    }
+    if (chunk === 'VP8X') {
+      return { width: 1 + buf.readUIntLE(24, 3), height: 1 + buf.readUIntLE(27, 3) }
+    }
+  }
+  // JPEG: FF D8 ... SOFn
+  if (buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) { i++; continue }
+      const marker = buf[i + 1]
+      if (marker === 0xff) { i++; continue }
+      if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) {
+        i += 2
+        continue
+      }
+      const len = buf.readUInt16BE(i + 2)
+      if (len < 2) break
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5) }
+      }
+      i += 2 + len
+    }
+  }
+  return null
+}
+
+function isCompositeIconContainer(b, boxes) {
+  if (b.type !== 'lanhublock' || b.kids.length < 2) return false
+  if (b.raw.w < 12 || b.raw.w > 96 || b.raw.h < 12 || b.raw.h > 96) return false
+  let hasText = false
+  let imgCount = 0
+  let maxImgArea = 0
+  const walk = (x) => {
+    if (x.type === 'lanhutext' && x.text?.trim()) hasText = true
+    if (x.type === 'lanhuimage') {
+      imgCount++
+      maxImgArea = Math.max(maxImgArea, x.raw.w * x.raw.h)
+    }
+    for (const k of x.kids) walk(boxes.get(k))
+  }
+  walk(b)
+  return !hasText && imgCount >= 1 && maxImgArea < b.raw.w * b.raw.h * 0.85
+}
+
 /**
  * 切图本地化三级策略：
  *   1. 直连原 URL（lanhu-oss-*.lanhuapp.com），某域名首次失败即同域熔断，不逐张卡超时；
  *   2. 自动改写到同源镜像 alipic.lanhuapp.com（携带 Cookie + Referer，逐字节一致，解决内网拦截 lanhu-oss-*）；
  *   3. 仍不可达时，若已拿到整张 reference.png 且该图片节点无上层文字遮挡，直接从原图裁切兜底；有文字遮挡则标为占位。
+ * 同时读取切图真实像素宽高写入 manifest 与 spec.md，并为 Figma 拆碎的组合小图标自动预裁整图。
  */
 export async function localizeAssets(compiled, outDir, cookie, { refImg = null, deadHosts = new Set(), manifestByUrl = null } = {}) {
   const imgBoxes = []
@@ -1105,7 +1179,7 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
       imgBoxes.push({ box: b, url: m[1] })
     }
   }
-  if (!urls.size) return { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0, failed: [] }
+  if (!urls.size) return { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, compositeIcons: 0, placeholders: 0, failed: [] }
 
   const dir = join(outDir, 'assets')
   mkdirSync(dir, { recursive: true })
@@ -1114,7 +1188,16 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
   if (!store.size && existsSync(manifestPath)) {
     try {
       for (const item of JSON.parse(readFileSync(manifestPath, 'utf8'))) {
-        if (item?.url) store.set(item.url, item)
+        if (!item?.url || !item?.file) continue
+        const absFile = join(outDir, item.file)
+        if (!existsSync(absFile)) continue
+        if (!item.pxWidth || !item.pxHeight) {
+          try {
+            const dims = imageDimensions(readFileSync(absFile))
+            if (dims) { item.pxWidth = dims.width; item.pxHeight = dims.height }
+          } catch { /* 忽略 */ }
+        }
+        store.set(item.url, item)
       }
     } catch { /* 旧 manifest 损坏时重建 */ }
   }
@@ -1133,7 +1216,14 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
         try {
           const buf = await getBinary(url, cookie, 8_000)
           writeFileSync(join(dir, name), buf)
-          store.set(url, { url, file: `assets/${name}`, bytes: buf.length, source: 'cdn' })
+          const dims = imageDimensions(buf)
+          store.set(url, {
+            url,
+            file: `assets/${name}`,
+            bytes: buf.length,
+            ...(dims ? { pxWidth: dims.width, pxHeight: dims.height } : {}),
+            source: 'cdn',
+          })
           return
         } catch (e) {
           lastErr = String(e.message ?? e)
@@ -1148,7 +1238,15 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
         try {
           const buf = await getBinary(mirror, cookie, 12_000)
           writeFileSync(join(dir, name), buf)
-          store.set(url, { url, mirror, file: `assets/${name}`, bytes: buf.length, source: 'alipic' })
+          const dims = imageDimensions(buf)
+          store.set(url, {
+            url,
+            mirror,
+            file: `assets/${name}`,
+            bytes: buf.length,
+            ...(dims ? { pxWidth: dims.width, pxHeight: dims.height } : {}),
+            source: 'alipic',
+          })
           return
         } catch (e) {
           lastErr = String(e.message ?? e)
@@ -1167,6 +1265,7 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
   let cdn = 0
   let alipic = 0
   let cropped = 0
+  let compositeIcons = 0
   let placeholders = 0
   const failed = []
 
@@ -1174,7 +1273,7 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
     const hit = store.get(url)
     if (hit) {
       b.css.backgroundImage = `url("./${hit.file}")`
-      b.asset = { status: 'ok', file: hit.file, source: hit.source }
+      b.asset = { status: 'ok', file: hit.file, source: hit.source, pxWidth: hit.pxWidth, pxHeight: hit.pxHeight }
       if (hit.source === 'alipic') alipic++
       else cdn++
       continue
@@ -1186,9 +1285,16 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
         const cropName = `crop-s${compiled.screenIndex}-${b.idx}-${createHash('sha1').update(url).digest('hex').slice(0, 6)}.png`
         writeFileSync(join(dir, cropName), cropBuf)
         const file = `assets/${cropName}`
-        store.set(`${url}#s${compiled.screenIndex}-${b.idx}`, { url, file, bytes: cropBuf.length, source: 'cropped-from-reference' })
+        store.set(`${url}#s${compiled.screenIndex}-${b.idx}`, {
+          url,
+          file,
+          bytes: cropBuf.length,
+          pxWidth: b.raw.w,
+          pxHeight: b.raw.h,
+          source: 'cropped-from-reference',
+        })
         b.css.backgroundImage = `url("./${file}")`
-        b.asset = { status: 'ok', file, source: 'cropped-from-reference' }
+        b.asset = { status: 'ok', file, source: 'cropped-from-reference', pxWidth: b.raw.w, pxHeight: b.raw.h }
         cropped++
         continue
       } catch { /* 裁剪异常退回占位 */ }
@@ -1199,9 +1305,45 @@ export async function localizeAssets(compiled, outDir, cookie, { refImg = null, 
     failed.push({ url, node: b.name, error: errMsg })
   }
 
+  // 预裁 Figma 拆碎的组合小图标（如 CSS 描边矩形 + 半截切图拼成的入口小图标）
+  const matchedCompositeNodes = new Set()
+  const hasMatchedAncestor = (b) => {
+    let p = b.parentNode
+    while (p) {
+      if (matchedCompositeNodes.has(p)) return true
+      p = compiled.boxes.get(p)?.parentNode ?? null
+    }
+    return false
+  }
+  for (const [node, b] of compiled.boxes) {
+    if (hasMatchedAncestor(b) || !isCompositeIconContainer(b, compiled.boxes)) continue
+    matchedCompositeNodes.add(node)
+    if (refImg && !overlapsText(b.raw, textRects)) {
+      try {
+        const compBuf = encodePng(cropPng(refImg, b.raw))
+        const compName = `composite-s${compiled.screenIndex}-${b.name}.png`
+        const file = `assets/${compName}`
+        writeFileSync(join(dir, compName), compBuf)
+        const key = `composite://screen-${compiled.screenIndex}/${b.name}`
+        store.set(key, {
+          url: key,
+          file,
+          bytes: compBuf.length,
+          pxWidth: b.raw.w,
+          pxHeight: b.raw.h,
+          source: 'composite-icon-crop',
+        })
+        b.compositeAsset = { file, pxWidth: b.raw.w, pxHeight: b.raw.h }
+        compositeIcons++
+        continue
+      } catch { /* 退回纯标注 */ }
+    }
+    b.compositeHint = true
+  }
+
   writeFileSync(manifestPath, JSON.stringify([...store.values()], null, 2))
   const saved = cdn + alipic + cropped
-  return { total: imgBoxes.length, saved, cdn, alipic, cropped, placeholders, failed }
+  return { total: imgBoxes.length, saved, cdn, alipic, cropped, compositeIcons, placeholders, failed }
 }
 
 /** 把整张画布裁出这一屏；支持传入 PNG Buffer 或已解码的图像对象以在多屏时复用解码结果。 */
@@ -1258,6 +1400,7 @@ export function writeArtifacts(outDir, { meta, tree, screens, screenDescs, compi
   return {
     outDir: resolve(outDir),
     screen: screenNo,
+    index: screenNo,
     specFile: `screen-${screenNo}.spec.md`,
     files: [
       `screen-${screenNo}.spec.md`, `screen-${screenNo}.png`, `screen-${screenNo}.html`,
@@ -1421,7 +1564,7 @@ export function resolveOutDir(out, { name = '', imageId = '', session, exec } = 
  */
 export async function buildDesign({
   url, cookie, out, session, exec, screens: picked, scale: forcedScale, unit: unitOpt,
-  reference = true, assets = true, list = false, meta: injectedMeta,
+  reference = true, assets = true, list = false, clean = false, meta: injectedMeta,
 } = {}) {
   if (!url && !injectedMeta) throw new Error('缺少 url')
   if (!cookie && !injectedMeta) {
@@ -1429,7 +1572,17 @@ export async function buildDesign({
   }
   const ids = url ? parseLanhuUrl(url) : {}
   const meta0 = await resolveImage({ ...ids, cookie })
-  const tree = await fetchDds({ versionId: meta0.versionId, cookie })
+  const tempOutDir = !list ? resolveOutDir(out, { name: meta0.name, imageId: ids.imageId, session, exec }) : null
+  let existingMeta = null
+  if (tempOutDir && !clean && existsSync(join(tempOutDir, 'meta.json'))) {
+    try { existingMeta = JSON.parse(readFileSync(join(tempOutDir, 'meta.json'), 'utf8')) } catch { existingMeta = null }
+  }
+  const rawCachePath = tempOutDir ? join(tempOutDir, 'dds.raw.json') : null
+  let tree = null
+  if (existingMeta && existingMeta.versionId === meta0.versionId && rawCachePath && existsSync(rawCachePath)) {
+    try { tree = JSON.parse(readFileSync(rawCachePath, 'utf8')) } catch { tree = null }
+  }
+  if (!tree) tree = await fetchDds({ versionId: meta0.versionId, cookie })
   const detected = detectScaleAndScreens(tree)
   const scale = Number(forcedScale ?? detected.scale)
   // 输出单位：design = 直出设计稿 px（750 基准，项目内 px→rem 统一换算，值是设计稿上看到多少就是多少）
@@ -1447,13 +1600,20 @@ export async function buildDesign({
 
   if (list) return { ok: true, list: true, session: sessionKey(session, exec), name: meta.name, canvas, scale, unit, screens: descs }
 
-  const outDir = resolveOutDir(out, { name: meta.name, imageId: ids.imageId, session, exec })
-  if (existsSync(outDir) && readdirSync(outDir).length) {
-    // 同一页重跑就覆盖，不留下上一次的 screen-N.* 残骸
+  const outDir = tempOutDir
+  const canReuse = Boolean(
+    !clean
+    && existingMeta
+    && existingMeta.versionId === meta.versionId
+    && existingMeta.unit === unit
+    && existingMeta.scale === scale,
+  )
+  if (!canReuse && existsSync(outDir) && readdirSync(outDir).length) {
+    // 仅在显式 clean 或设计稿版本/单位变更时清空目录；同版本局部重编保留其余屏产物与切图
     for (const f of readdirSync(outDir)) rmSync(join(outDir, f), { recursive: true, force: true })
   }
   mkdirSync(outDir, { recursive: true })
-  writeFileSync(join(outDir, 'dds.raw.json'), JSON.stringify(tree))
+  if (!existsSync(join(outDir, 'dds.raw.json'))) writeFileSync(join(outDir, 'dds.raw.json'), JSON.stringify(tree))
   writeFileSync(join(outDir, 'screens.json'), JSON.stringify(descs, null, 2))
   writeFileSync(join(outDir, 'meta.json'), JSON.stringify({
     ...meta,
@@ -1464,10 +1624,20 @@ export async function buildDesign({
 
   let refPng = null
   let refImg = null
-  if (reference && meta.referenceUrl) {
+  const refPath = join(outDir, 'reference.png')
+  if (canReuse && existsSync(refPath)) {
+    try {
+      refPng = readFileSync(refPath)
+      refImg = decodePng(refPng)
+    } catch {
+      refPng = null
+      refImg = null
+    }
+  }
+  if (!refPng && reference && meta.referenceUrl) {
     try {
       refPng = await getBinary(meta.referenceUrl, cookie)
-      writeFileSync(join(outDir, 'reference.png'), refPng)
+      writeFileSync(refPath, refPng)
       try { refImg = decodePng(refPng) } catch { refImg = null }
     } catch (e) {
       refPng = null
@@ -1479,10 +1649,10 @@ export async function buildDesign({
     ? allScreens.map((s) => s.index)
     : String(picked).split(',').map((x) => Number(x.trim()))
   const built = []
-  const builtEntries = []
+  const builtEntriesByIdx = new Map()
   const deadHosts = new Set()
   const manifestByUrl = new Map()
-  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0 }
+  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, compositeIcons: 0, placeholders: 0 }
 
   for (const idx of want) {
     const s = allScreens[idx]
@@ -1497,16 +1667,20 @@ export async function buildDesign({
       assetSummary.cdn += assetResult.cdn
       assetSummary.alipic += assetResult.alipic
       assetSummary.cropped += assetResult.cropped
+      assetSummary.compositeIcons += assetResult.compositeIcons ?? 0
       assetSummary.placeholders += assetResult.placeholders
     }
-    const crop = (refImg || refPng) ? cropScreenPng(refImg || refPng, s.raw) : null
+    const needCrop = reference || !existsSync(join(outDir, `screen-${idx}.png`))
+    const crop = needCrop && (refImg || refPng)
+      ? cropScreenPng(refImg || refPng, s.raw)
+      : (existsSync(join(outDir, `screen-${idx}.png`)) ? 'reused' : null)
     const groups = findRepeatGroups(compiled)
     const result = writeArtifacts(outDir, {
       meta, tree: null, screens: allScreens, screenDescs: descs, compiled, groups,
       crop: Buffer.isBuffer(crop) ? crop : null,
       skipSummary: true,
     })
-    builtEntries.push({ compiled, groups, title: descs[idx].title })
+    builtEntriesByIdx.set(idx, { compiled, groups, title: descs[idx].title })
     built.push({
       ...result,
       title: descs[idx].title,
@@ -1518,15 +1692,31 @@ export async function buildDesign({
         cdn: assetResult.cdn,
         alipic: assetResult.alipic,
         cropped: assetResult.cropped,
+        compositeIcons: assetResult.compositeIcons ?? 0,
         placeholders: assetResult.placeholders,
       } : null,
-      crop: Buffer.isBuffer(crop) ? `screen-${idx}.png` : (crop?.error ?? null),
+      crop: Buffer.isBuffer(crop) || crop === 'reused' ? `screen-${idx}.png` : (crop?.error ?? null),
       repeatGroups: groups.map((g) => ({ parent: g.parentName, count: g.count, texts: g.texts })),
     })
   }
 
-  const summary = builtEntries.length
-    ? writeSummaryArtifacts(outDir, { meta, screenDescs: descs, builtEntries, assetStats: assets ? assetSummary : null })
+  // 若目录下还保留着同会话前序编译的其他屏（增量构建），一并纳入全局 report.md 与 variants-diff.md，避免冲掉前序汇总
+  if (canReuse) {
+    for (const f of readdirSync(outDir)) {
+      const m = /^screen-(\d+)\.spec\.md$/.exec(f)
+      if (!m) continue
+      const idx = Number(m[1])
+      if (builtEntriesByIdx.has(idx) || !allScreens[idx]) continue
+      const compiled = compileScreen(tree, allScreens[idx].node, { scale: div, screenIndex: idx })
+      builtEntriesByIdx.set(idx, { compiled, groups: findRepeatGroups(compiled), title: descs[idx].title })
+    }
+  }
+  const summaryEntries = [...builtEntriesByIdx.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => v)
+
+  const summary = summaryEntries.length
+    ? writeSummaryArtifacts(outDir, { meta, screenDescs: descs, builtEntries: summaryEntries, assetStats: assets ? assetSummary : null })
     : { variantsDiff: null, variantPairs: [] }
 
   const key = sessionKey(session, exec)
@@ -1535,15 +1725,17 @@ export async function buildDesign({
     session: key,
     tmpDir: sessionTmp(session, exec),
     outDir,
+    reusedCache: canReuse,
     canvas,
     scale,
     unit,
     screens: descs,
     built,
+    cachedScreens: [...builtEntriesByIdx.keys()].sort((a, b) => a - b),
     assets: assets ? assetSummary : null,
     variantsDiff: summary.variantsDiff,
     variantPairs: summary.variantPairs,
-    reference: Boolean(refPng),
+    reference: existsSync(refPath),
   }
 }
 
@@ -1564,6 +1756,7 @@ async function cmdBuild(args) {
     reference: args['no-ref'] !== 'true',
     assets: args['no-assets'] !== 'true',
     list: args.list === 'true',
+    clean: args.clean === 'true',
   })
   if (r.list) { console.log(JSON.stringify({ name: r.name, canvas: r.canvas, scale: r.scale, screens: r.screens }, null, 2)); return }
   if (givenCookie) saveCookie(givenCookie)
@@ -1600,7 +1793,7 @@ async function cmdLocal(args) {
   const builtEntries = []
   const deadHosts = new Set()
   const manifestByUrl = new Map()
-  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0 }
+  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, compositeIcons: 0, placeholders: 0 }
   const wantAssets = args['no-assets'] !== 'true'
 
   for (const idx of picked) {
@@ -1614,6 +1807,7 @@ async function cmdLocal(args) {
       assetSummary.cdn += ar.cdn
       assetSummary.alipic += ar.alipic
       assetSummary.cropped += ar.cropped
+      assetSummary.compositeIcons += ar.compositeIcons ?? 0
       assetSummary.placeholders += ar.placeholders
     }
     const crop = (refImg || refPng) ? cropScreenPng(refImg || refPng, s.raw) : null
@@ -1851,12 +2045,22 @@ export function initProjectRules(projectDir = process.cwd()) {
   return { ok: true, path: dest }
 }
 
-const SKIP_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|components?|es|esm|lib|dist|src|build|cjs|mjs|umd|types|typings|style|styles|theme|locale|locales|utils?|hooks?|_util|common|shared|assets|icons?|constants|mixins|directives|composables)$/
-const WALK_PRUNE_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|style|styles|theme|locale|locales|utils?|hooks?|_util|assets|constants|mixins|directives|composables)$/
+const SKIP_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|components?|atoms?|molecules?|organisms?|templates?|pages?|views?|business|modules?|packages?|containers?|layouts?|widgets?|es|esm|lib|dist|src|build|cjs|mjs|umd|types|typings|style|styles|theme|locale|locales|utils?|hooks?|_util|common|shared|assets|icons?|constants|mixins|directives|composables)$/i
+const WALK_PRUNE_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|style|styles|theme|locale|locales|utils?|hooks?|_util|assets|constants|mixins|directives|composables)$/i
 
 const pascal = (s) => s.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('')
 
 const NOISE_PROP = /^(class|style|innerHTML|ref|key|slots?|scopedSlots|attrs|children|v-slots|modelModifiers|\$\w+|__\w+|on[A-Z]\w*)$/
+const WRAPPER_TYPE_NAMES = new Set([
+  'Readonly', 'Partial', 'Required', 'Pick', 'Omit', 'ExtractPropTypes', 'ExtractPublicPropTypes',
+  'typeof', 'import', 'vue', 'PublicProps', 'VNodeProps', 'AllowedComponentProps', 'ComponentCustomProps',
+])
+
+function stripJsComments(text) {
+  return String(text ?? '')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+}
 
 /** 提取从 openBraceIdx ('{') 开始的平衡花括号内容与顶层（depth=1）属性键名。 */
 function topKeysInBrace(text, openBraceIdx) {
@@ -1916,12 +2120,111 @@ function topKeysInBrace(text, openBraceIdx) {
   return keys
 }
 
-function extractPropsFromText(t) {
+function lookupNamedTypeBrace(text, refName, baseDir = null) {
+  const escName = refName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const declRe = new RegExp(
+    `(?:(?:interface|type)\\s+${escName}(?:\\s*<[^>]*>)?\\s*(?:=\\s*)?(?:extends[^{;]*)?|(?:export\\s+)?(?:declare\\s+)?const\\s+${escName}\\s*:\\s*(?:Readonly\\s*<\\s*)?)\\{`,
+  )
+  const localMatch = declRe.exec(text)
+  if (localMatch) return topKeysInBrace(text, localMatch.index + localMatch[0].length - 1)
+  if (!baseDir) return []
+
+  const impRe = new RegExp(`import\\s+(?:type\\s+)?\\{[^}]*\\b${escName}\\b[^}]*\\}\\s+from\\s+['"](\\.[^'"]+)['"]`)
+  const impMatch = impRe.exec(text)
+  if (!impMatch) return []
+  const target = resolveModuleTarget(baseDir, impMatch[1])
+  if (!target) return []
+  try {
+    const extText = readFileSync(target, 'utf8')
+    const extMatch = declRe.exec(extText)
+    if (extMatch) return topKeysInBrace(extText, extMatch.index + extMatch[0].length - 1)
+  } catch { /* 忽略 */ }
+  return []
+}
+
+/**
+ * 解析 DefineComponent<FirstTypeArg, ...> 的第一个类型参数：
+ * 兼容 DefineComponent<{...}>、DefineComponent<ExtractPropTypes<{...}>>、
+ * DefineComponent<__VLS_TypePropsToRuntimeProps<{...}>>、DefineComponent<XwCardProps> 等全部 vue-tsc 产物形态。
+ */
+function extractFromDefineComponentAt(text, ltIdx, baseDir = null) {
+  if (text[ltIdx] !== '<') return []
+  let angle = 0
+  let paren = 0
+  let brace = 0
+  for (let i = ltIdx; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '(') { paren++; continue }
+    if (ch === ')') { if (paren > 0) paren--; continue }
+    if (paren > 0) continue
+    if (ch === '{') {
+      if (brace === 0 && angle >= 1) {
+        const direct = topKeysInBrace(text, i)
+        if (direct.length) return direct
+      }
+      brace++
+      continue
+    }
+    if (ch === '}') { if (brace > 0) brace--; continue }
+    if (brace > 0) continue
+    if (ch === '<') { angle++; continue }
+    if (ch === '>') {
+      angle--
+      if (angle === 0) {
+        const firstArg = text.slice(ltIdx + 1, i)
+        return resolveTypeArgRefs(text, firstArg, baseDir)
+      }
+      continue
+    }
+    if (ch === ',' && angle === 1) {
+      const firstArg = text.slice(ltIdx + 1, i)
+      return resolveTypeArgRefs(text, firstArg, baseDir)
+    }
+  }
+  return []
+}
+
+function resolveTypeArgRefs(text, firstArg, baseDir) {
   const keys = new Set()
+  for (const idMatch of firstArg.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)) {
+    const id = idMatch[1]
+    if (WRAPPER_TYPE_NAMES.has(id) || /^__VLS_/.test(id)) continue
+    for (const k of lookupNamedTypeBrace(text, id, baseDir)) keys.add(k)
+  }
+  return [...keys]
+}
+
+function extractPropsFromText(t, { compName = null, baseDir = null } = {}) {
+  const keys = new Set()
+
+  // 多组件合包文件（如 es/index.d.ts）优先精确定位目标组件的声明，防止跨组件串味
+  if (compName) {
+    const escComp = compName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const compDeclRe = new RegExp(
+      `(?:export\\s+)?(?:declare\\s+)?const\\s+${escComp}\\s*:\\s*(?:import\\([^)]*\\)\\.)?DefineComponent\\s*<`,
+      'g',
+    )
+    for (const m of t.matchAll(compDeclRe)) {
+      const ltIdx = m.index + m[0].length - 1
+      for (const k of extractFromDefineComponentAt(t, ltIdx, baseDir)) keys.add(k)
+    }
+    const lowerFirst = compName.charAt(0).toLowerCase() + compName.slice(1)
+    for (const candidate of [`${compName}Props`, `${lowerFirst}Props`]) {
+      for (const k of lookupNamedTypeBrace(t, candidate, baseDir)) keys.add(k)
+    }
+    if (keys.size) return [...keys].slice(0, 14)
+    // 若该文件定义了多个 DefineComponent 且当前组件没匹配到 props，不退回扫全文件以免把别的组件 props 算进来
+    if ((t.match(/\bDefineComponent\s*</g) ?? []).length > 1) return []
+  }
+
+  for (const m of t.matchAll(/\bDefineComponent\s*</g)) {
+    const ltIdx = m.index + m[0].length - 1
+    for (const k of extractFromDefineComponentAt(t, ltIdx, baseDir)) keys.add(k)
+  }
   const patterns = [
-    /(?:interface|type)\s+\w*(?:Props|Options|Attrs)\w*(?:\s*<[^>]*>)?\s*(?:=\s*)?(?:extends[^{]*)?\{/g,
+    /(?:interface|type)\s+\w*(?:Props|Options|Attrs)\w*(?:\s*<[^>]*>)?\s*(?:=\s*)?(?:extends[^{;]*)?\{/g,
+    /(?:export\s+)?(?:declare\s+)?const\s+\w*(?:Props|props)\w*\s*:\s*(?:Readonly\s*<\s*)?\{/g,
     /defineProps\s*<\s*\{/g,
-    /DefineComponent\s*<\s*\{/g,
     /\bprops\s*:\s*\{/g,
   ]
   for (const re of patterns) {
@@ -1933,10 +2236,10 @@ function extractPropsFromText(t) {
   return [...keys].slice(0, 14)
 }
 
-function propsOfFile(filePath, pkgDir) {
+function propsOfFile(filePath, pkgDir, compName = null) {
   try {
     const t = readFileSync(filePath, 'utf8')
-    const props = extractPropsFromText(t)
+    const props = extractPropsFromText(t, { compName, baseDir: dirname(filePath) })
     const rel = filePath.startsWith(pkgDir) ? filePath.slice(pkgDir.length + 1).replace(/\\/g, '/') : basename(filePath)
     return { props, from: props.length ? rel : null }
   } catch {
@@ -1945,10 +2248,10 @@ function propsOfFile(filePath, pkgDir) {
 }
 
 /** 从目录或单文件（.d.ts / .ts / .vue）抠 props 字段名；from 记录取自哪个相对路径。 */
-function propsOf(targetPath, pkgDir) {
+function propsOf(targetPath, pkgDir, compName = null) {
   let st = null
   try { st = statSync(targetPath) } catch { return { props: [], from: null } }
-  if (st.isFile()) return propsOfFile(targetPath, pkgDir)
+  if (st.isFile()) return propsOfFile(targetPath, pkgDir, compName)
 
   let files = []
   try {
@@ -1965,7 +2268,7 @@ function propsOf(targetPath, pkgDir) {
   let from = null
   for (const f of files) {
     const full = join(targetPath, f)
-    const r = propsOfFile(full, pkgDir)
+    const r = propsOfFile(full, pkgDir, compName)
     if (r.props.length) {
       for (const k of r.props) keys.add(k)
       if (!from) from = r.from
@@ -1996,10 +2299,11 @@ function collectBarrelExports(entryAbs, pkgDir) {
   const visited = new Set()
 
   const visit = (fileAbs, depth) => {
-    if (!fileAbs || depth > 5 || visited.has(fileAbs)) return
+    if (!fileAbs || depth > 6 || visited.has(fileAbs)) return
     visited.add(fileAbs)
-    let t = ''
-    try { t = readFileSync(fileAbs, 'utf8') } catch { return }
+    let raw = ''
+    try { raw = readFileSync(fileAbs, 'utf8') } catch { return }
+    const t = stripJsComments(raw)
     const dir = dirname(fileAbs)
 
     // 1. 本地声明的组件常量/类：export declare const XwButton: DefineComponent<...> 或 declare const XxxOutline ...
@@ -2032,14 +2336,10 @@ function collectBarrelExports(entryAbs, pkgDir) {
         if (!exported.has(name)) exported.set(name, target ?? fileAbs)
       }
     }
-    // 4. 递归跟进多级转发：export * from './components/wealth'
-    for (const m of t.matchAll(/export\s*\*\s*(?:as\s+([A-Z][\w]*)\s+)?from\s*['"](\.[^'"]+)['"]/g)) {
+    // 4. 递归跟进多级转发：export * from './components/wealth'（忽略命名空间对象 export * as Atoms）
+    for (const m of t.matchAll(/export\s*\*\s*(?:as\s+([A-Za-z_$][\w$]*)\s+)?from\s*['"](\.[^'"]+)['"]/g)) {
       const target = resolveModuleTarget(dir, m[2])
-      if (m[1]) {
-        if (!exported.has(m[1])) exported.set(m[1], target)
-      } else if (target) {
-        visit(target, depth + 1)
-      }
+      if (!m[1] && target) visit(target, depth + 1)
     }
     // 若当前 .js 入口旁边有同名 .d.ts，顺带读它的类型导出
     if (/\.(m?js|cjs)$/.test(fileAbs)) {
@@ -2052,21 +2352,20 @@ function collectBarrelExports(entryAbs, pkgDir) {
   return exported
 }
 
-function isAggregatorDir(subAbs, dirName) {
+function isAggregatorDir(subAbs) {
   if (existsSync(join(subAbs, 'index.vue'))) return false
   const idxFile = ['index.d.ts', 'index.mjs', 'index.js', 'index.cjs']
     .map((f) => join(subAbs, f))
     .find((p) => existsSync(p))
   if (!idxFile) return false
-  let t = ''
-  try { t = readFileSync(idxFile, 'utf8') } catch { return false }
+  let raw = ''
+  try { raw = readFileSync(idxFile, 'utf8') } catch { return false }
+  const t = stripJsComments(raw)
   const hasReExport = /export\s*(?:\*|\{[^}]*\})\s*from\s*['"]\./.test(t)
   if (!hasReExport) return false
-  const expected = pascal(dirName).toLowerCase()
   const hasDefault = /\bexport\s+default\b|\bas\s+default\b/.test(t)
-  const hasOwnDecl = /DefineComponent|(?:interface|type)\s+\w*(?:Props|Options)\b/.test(t)
-  const mentionsSelf = new RegExp(`\\b${expected}\\b`, 'i').test(t)
-  return !hasDefault && !hasOwnDecl && !mentionsSelf
+  const hasOwnDecl = /\bDefineComponent\b|(?:interface|type)\s+\w*(?:Props|Options)\b|(?:export\s+)?(?:declare\s+)?(?:const|function|class)\s+[A-Z]/.test(t)
+  return !hasDefault && !hasOwnDecl
 }
 
 function walkComponentFiles(pkgDir, coveredNames) {
@@ -2077,7 +2376,7 @@ function walkComponentFiles(pkgDir, coveredNames) {
 
   const seenNames = new Set(coveredNames)
   const walk = (dirAbs, relPrefix, depth) => {
-    if (depth > 4) return
+    if (depth > 5) return
     let entries = []
     try { entries = readdirSync(dirAbs, { withFileTypes: true }) } catch { return }
 
@@ -2086,16 +2385,16 @@ function walkComponentFiles(pkgDir, coveredNames) {
         if (WALK_PRUNE_DIRS.test(e.name)) continue
         const subAbs = join(dirAbs, e.name)
         const subRel = `${relPrefix}/${e.name}`
-        // 目录式组件：foo/index.{d.ts,vue,js,mjs}（排除纯转发聚合目录如 wealth/index.d.ts）
+        // 目录式组件：foo/index.{d.ts,vue,js,mjs}（排除纯转发聚合目录如 wealth/index.d.ts、atoms/index.d.ts）
         if (
           !SKIP_DIRS.test(e.name)
           && ['index.d.ts', 'index.vue', 'index.mjs', 'index.js', 'index.cjs'].some((f) => existsSync(join(subAbs, f)))
-          && !isAggregatorDir(subAbs, e.name)
+          && !isAggregatorDir(subAbs)
         ) {
           const compName = pascal(e.name)
           if (!seenNames.has(compName)) {
             seenNames.add(compName)
-            const parsed = propsOf(subAbs, pkgDir)
+            const parsed = propsOf(subAbs, pkgDir, compName)
             found.push({ name: compName, sub: subRel, barrel: false, props: parsed.props, propsFrom: parsed.from })
           }
           continue
@@ -2110,7 +2409,7 @@ function walkComponentFiles(pkgDir, coveredNames) {
         if (seenNames.has(compName)) continue
         seenNames.add(compName)
         const fileAbs = join(dirAbs, e.name)
-        const parsed = propsOfFile(fileAbs, pkgDir)
+        const parsed = propsOfFile(fileAbs, pkgDir, compName)
         const cleanSub = `${relPrefix}/${compName}`
         found.push({ name: compName, sub: cleanSub, barrel: false, props: parsed.props, propsFrom: parsed.from })
       }
@@ -2126,9 +2425,9 @@ function walkComponentFiles(pkgDir, coveredNames) {
 
 /**
  * 扫内网 UI 库安装产物：
- *   1. 递归跟进入口 .d.ts / barrel（支持多级 `export * from` 与具名转发）；
- *   2. 深度遍历子目录与平铺 PascalCase 组件文件（如 `es/components/wealth/atoms/XwCard.d.ts`）；
- *   3. 识别纯图标包（如 `@xwfintech/icon-components` 的上百个 `*Outline/*Filled`），避免刷屏。
+ *   1. 递归跟进入口 .d.ts / barrel（支持多级 `export * from` 与具名转发，兼容 Windows 反斜杠路径）；
+ *   2. 深度遍历子目录与平铺 PascalCase 组件文件（支持 DefineComponent<ExtractPropTypes<{...}>> 等全部形态）；
+ *   3. 识别纯图标包（如 `@xwfintech/icon-components` 的 `*Outline` / `*Fill`），输出完整可用图标名列表避免模型进 node_modules 手翻。
  */
 export function inspectUiLibrary(projectDir, pkgName) {
   const project = resolve(projectDir)
@@ -2163,12 +2462,13 @@ export function inspectUiLibrary(projectDir, pkgName) {
   const coveredNames = new Set()
   for (const [name, targetAbs] of exported) {
     if (/(?:Props|Options|Attrs|Instance|Expose|Emits|Slots|Theme|Locale|Config)$/i.test(name)) continue
+    if (SKIP_DIRS.test(name)) continue
     let parsed = { props: [], from: null }
     if (targetAbs) {
-      const dirCandidate = targetAbs.replace(/\/index\.(d\.ts|vue|m?js|cjs|ts)$/, '')
+      const dirCandidate = targetAbs.replace(/[\\/]index\.(d\.ts|vue|m?js|cjs|ts)$/, '')
       parsed = dirCandidate !== targetAbs && existsSync(dirCandidate)
-        ? propsOf(dirCandidate, pkgDir)
-        : propsOf(targetAbs, pkgDir)
+        ? propsOf(dirCandidate, pkgDir, name)
+        : propsOf(targetAbs, pkgDir, name)
     }
     coveredNames.add(name)
     components.push({
@@ -2190,13 +2490,19 @@ export function inspectUiLibrary(projectDir, pkgName) {
     })
   }
 
-  // 区分图标组件与普通业务 UI 组件（避免 150 个 *Outline 图标挤爆组件表）
-  const iconGlyphRe = /(?:Outline|Filled|TwoTone|Twotone|Glyph)$|^Icon[A-Z]/
-  const glyphIcons = components.filter((c) => iconGlyphRe.test(c.name) && c.props.length <= 3)
+  // 区分图标组件与普通业务 UI 组件（兼容 *Outline / *Fill / *Filled / *TwoTone 等全部图标命名后缀）
+  const iconGlyphRe = /(?:Outline|Outlined|Filled|Fill|TwoTone|Twotone|Glyph|Solid|Line)$|^Icon[A-Z]/
+  const glyphIcons = components.filter((c) => iconGlyphRe.test(c.name))
   const isIconPack = ICON_PKG_RE.test(pkgName) || (glyphIcons.length >= 15 && glyphIcons.length >= components.length * 0.6)
   const mainComponents = isIconPack
     ? components.filter((c) => !iconGlyphRe.test(c.name))
     : components
+  const sortedGlyphNames = isIconPack
+    ? glyphIcons.map((c) => c.name).sort((a, b) => a.localeCompare(b))
+    : []
+  const glyphProps = isIconPack
+    ? (glyphIcons.find((c) => c.props.length)?.props ?? [])
+    : []
 
   // 全局注册库检测
   let globalLib = false
@@ -2216,8 +2522,10 @@ export function inspectUiLibrary(projectDir, pkgName) {
     entry: jsEntryRel ?? entryRel ?? null,
     global: globalLib,
     isIconPack,
-    glyphCount: isIconPack ? glyphIcons.length : 0,
-    glyphSamples: isIconPack ? glyphIcons.slice(0, 20).map((c) => c.name) : [],
+    glyphCount: sortedGlyphNames.length,
+    glyphProps,
+    glyphNames: sortedGlyphNames,
+    glyphSamples: sortedGlyphNames.slice(0, 20),
     components: (isIconPack ? mainComponents : components).sort((x, y) => x.name.localeCompare(y.name)),
   }
 }
@@ -2234,7 +2542,7 @@ export function readUiLibrary(projectDir) {
   const withProps = components - (t.match(/（未解析到）/g) ?? []).length
   const placeholder = /（待填|TODO\(接入\)|（示例组件）/.test(t)
   const pkg = (t.match(/- 包：`([^`]+)`/) ?? [])[1] ?? null
-  const hasIconsOnly = components === 0 && /图标总数：\d+/.test(t)
+  const hasIconsOnly = components === 0 && /图标总数：[1-9]\d*/.test(t)
   const usable = ((components > 0 && withProps > 0) || hasIconsOnly) && !placeholder
   let askUser = null
   if (!components && !hasIconsOnly) askUser = 'ui-library.md 是空表。先确认 --pkg 是否指向了真正的 UI 组件包（而非工具包），仍扫不出再向用户要常用组件清单或真实用法示例。'
@@ -2251,11 +2559,17 @@ function renderOnePkgSection(info) {
   L.push(`- 入口：\`${info.entry ?? '（未声明）'}\``)
   if (info.isIconPack) {
     L.push(`- 类型：图标库（包装组件 ${info.components.length} 个，单图标导出 — 图标总数：${info.glyphCount}）`)
-    if (info.glyphSamples.length) {
-      L.push(`- 单图标示例（\`import { Xxx } from '${info.pkg}'\`）：${info.glyphSamples.map((n) => `\`${n}\``).join('、')}${info.glyphCount > info.glyphSamples.length ? ' …' : ''}`)
+    if (info.glyphProps?.length) {
+      L.push(`- 单图标通用 props：${info.glyphProps.map((p) => `\`${p}\``).join(' ')}`)
+    }
+    const allNames = info.glyphNames ?? info.glyphSamples ?? []
+    if (allNames.length) {
+      const shown = allNames.slice(0, 500)
+      L.push(`- 全部可用单图标名（\`import { Xxx } from '${info.pkg}'\`，直接从此列表选用，无需再翻 \`node_modules\`）：${shown.map((n) => `\`${n}\``).join(' ')}${allNames.length > shown.length ? ` …（共 ${allNames.length} 个）` : ''}`)
     }
   } else {
-    L.push(`- 组件数：${info.components.length}`)
+    const withPropsCount = info.components.filter((c) => c.props.length).length
+    L.push(`- 组件数：${info.components.length}（已解析出 props：${withPropsCount}）`)
     L.push(`- 注册方式：${info.global ? '全局注册（检测到 `GlobalComponents`：模板直接写标签）' : '按需引入（若项目有统一 `shared.ts` 转发或 `AGENTS.md` 另有约定，以项目既有页面写法为准）'}`)
   }
   L.push('')

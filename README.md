@@ -14,9 +14,9 @@
 | 能力 | 名字 | 作用 |
 |---|---|---|
 | 工具 | `lanhu_dds_screens` | 列出设计图里的所有手机屏（一张图常横排 5~10 屏），含尺寸/节点数/是否整图/导航标题 |
-| 工具 | `lanhu_dds_build` | 编译指定屏：产出单文件紧凑规格表 `screen-N.spec.md`、设计稿裁图 `screen-N.png`、多屏变体差异 `variants-diff.md`、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退 |
-| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md` |
-| Skill | `lanhu-dds-codegen` | 一页一闭环增量还原流程：自检 → 选屏 → 编译 → 逐页读 `spec.md`+`png` 出码 → 静态门禁验收 |
+| 工具 | `lanhu_dds_build` | 编译指定屏（同会话增量合并，不误删已编译屏）：产出单文件紧凑规格表 `screen-N.spec.md`（含切图像素尺寸与组合小图标预裁图）、设计稿裁图 `screen-N.png`、多屏变体差异 `variants-diff.md`、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退 |
+| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md`（兼容 Windows 路径、`DefineComponent<ExtractPropTypes<...>>` 与全量图标导出名列表） |
+| Skill | `lanhu-dds-codegen` | 开工契约确认（整体重构 vs 局部优化 + 屏范围映射）+ 一页一闭环增量还原流程 |
 
 ## 接入（内网装完之后的第一件事）
 
@@ -33,7 +33,7 @@ lanhu_dds_doctor({ ui: true })
 
 - **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。
 - **`agentDocs` 与 `rules`**：若项目根已有完备的 `AGENTS.md` / `CLAUDE.md`，直接认作主规范来源，不再强制生成空白 `project-rules.md` 避免冲突。
-- **`uiPackages` / `iconPackages`**：自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等工具包，递归跟进多级 `export * from` 与深层组件 `.d.ts`（含 `DefineComponent<{...}>`、`interface *Props`），生成 `ui-library.md`。
+- **`uiPackages` / `iconPackages`**：自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等工具包，递归跟进多级 `export * from` 与深层组件 `.d.ts`（兼容 `DefineComponent<ExtractPropTypes<{...}>>`、`DefineComponent<XxxProps>`、`interface *Props` 及 Windows 反斜杠路径），并为图标包输出全部单图标导出名清单到 `ui-library.md`。
 
 ## 安装
 
@@ -106,7 +106,7 @@ lanhu_dds_doctor({ forget: true })
 └── sessions/
     └── <会话标识>/                  # 插件取当前 DSH 会话 id 前 12 位；命令行取时间戳
         ├── tmp/                    # 本次会话的临时脚本
-        └── 我的订单-4a3b8460/       # 本次会话的产物，重跑先清空再写
+        └── 我的订单-4a3b8460/       # 本次会话的产物（同会话补编部分屏时增量合并，传 clean:true 则清空重建）
 ```
 
 两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`（命令行 `--session`）。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
@@ -126,7 +126,7 @@ lanhu_dds_doctor({ forget: true })
 
 | 文件 | 作用 |
 |---|---|
-| `screen-N.spec.md` | **主输入**：单文件紧凑规格表（组件候选 + 屏内 `(0,0)` 坐标 + 父相位移 + 兄弟间距 + 完整样式 + 文案 + 切图路径） |
+| `screen-N.spec.md` | **主输入**：单文件紧凑规格表（组件候选 + 屏内 `(0,0)` 坐标 + 父相位移 + 兄弟间距 + 完整样式 + 文案 + 切图真实像素尺寸 + 组合碎片图标预裁图） |
 | `screen-N.png` | 设计稿裁图（视觉唯一真相） |
 | `variants-diff.md` | 多屏编译时自动识别同页面状态/弹层变体并列出差异块 |
 | `tokens.css` / `report.md` | 多屏汇总的颜色/字体 token 与体检报告（不覆盖前序屏） |

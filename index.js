@@ -113,7 +113,11 @@ const BUILD_PARAMS = {
       description: '输出单位。design（默认）= 直出设计稿 px，750 基准，交给项目内 px→rem 换算；css = 折成 375 逻辑宽的 CSS px。',
     },
     reference: { type: 'boolean', description: '是否下载整张画布参考图并裁出每屏 PNG。默认 true。' },
-    assets: { type: 'boolean', description: '是否把切图下载到本地 assets/。默认 true。' },
+    assets: { type: 'boolean', description: '是否把切图下载到本地 assets/（含像素宽高与组合碎片小图标预裁）。默认 true。' },
+    clean: {
+      type: 'boolean',
+      description: '是否清空同会话产物目录后全量重建。默认 false（同设计图同单位下增量合并，保留此前已编译的其他屏与 reference.png）。',
+    },
   },
 }
 
@@ -148,7 +152,8 @@ export function createScreensTool() {
     description:
       '列出蓝湖设计图里包含的所有手机屏（一张设计图通常横排多台手机屏）。' +
       '返回每屏的序号、尺寸、节点数、是否整图（raster）、导航栏标题与首屏文案。' +
-      '照设计稿写代码前先调用它选屏，不要跳过。缺 Cookie 时返回 missing-cookie 与获取方法——此时停下来问用户，不要自行编造。',
+      '照设计稿写代码前必须先调用它选屏，随后用 ask_user_question 向用户确认「整体重构 vs 局部优化」与「屏→页面范围映射」后再调 lanhu_dds_build。' +
+      '缺 Cookie 时返回 missing-cookie 与获取方法——此时停下来问用户，不要自行编造。',
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args, exec) {
@@ -243,8 +248,9 @@ export function createBuildTool() {
   return {
     name: 'lanhu_dds_build',
     description:
-      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（含层级、屏内坐标、父相位移、间距、完整样式与文案，单次 read 即可直接写代码）、' +
-      '设计稿裁图 screen-N.png、多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图。',
+      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（含层级、屏内坐标、父相位移、间距、完整样式、切图像素尺寸、组合小图标预裁图与文案，单次 read 即可写代码）、' +
+      '设计稿裁图 screen-N.png、多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图。' +
+      '同一会话重跑部分 screens 时默认非破坏性增量合并，不会删掉已编译的其他屏与 reference.png。',
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args, exec) {
@@ -263,6 +269,7 @@ export function createBuildTool() {
           unit: args.unit,
           reference: args.reference !== false,
           assets: args.assets !== false,
+          clean: Boolean(args.clean),
         })
         const saved = given ? saveCookie(given) : null
         return {
