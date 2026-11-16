@@ -25,77 +25,60 @@ export const inject = ['tools', 'skills']
  * 凭据解析优先级：显式 config → 环境变量 → harness home 的 .env → 家目录单独文件。
  * 不写死在配置里，配置文件会被提交。
  */
-export function resolveCookie(config) {
-  if (config?.cookie) return { value: String(config.cookie), from: 'config' }
-  if (process.env.LANHU_COOKIE) return { value: process.env.LANHU_COOKIE, from: 'env:LANHU_COOKIE' }
+// 唯一来源：用户在对话里给出、由模型作为参数传进来的值。
+// 不读环境变量、不读配置文件——少一条查找链就少一类「我明明配了却不生效」的故障。
+// 进程内只记住最近一次用户给出的同一个值，供同一轮任务后续调用复用；不落盘，进程结束即消失。
+let userCookie = ''
 
-  const candidates = []
-  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
-  candidates.push(join(home, '.env'))
-  candidates.push(join(process.cwd(), '.env'))
-  if (config?.cookieFile) candidates.unshift(String(config.cookieFile))
-  candidates.push(join(homedir(), '.lanhu-cookie'))
-
-  for (const file of candidates) {
-    try {
-      if (!existsSync(file)) continue
-      const text = readFileSync(file, 'utf8')
-      if (file.endsWith('.env')) {
-        const m = /^\s*(?:export\s+)?LANHU_COOKIE\s*=\s*"?([^"\n]+)"?\s*$/m.exec(text)
-        if (m) return { value: m[1].trim(), from: file }
-      } else {
-        const v = text.trim().replace(/^["']|["']$/g, '')
-        if (v) return { value: v, from: file }
-      }
-    } catch {
-      // 读不到就试下一个来源，不在这里抛
-    }
+export function takeCookie(args) {
+  const given = typeof args?.cookie === 'string' ? args.cookie.trim() : ''
+  if (given) {
+    userCookie = given
+    return { value: given, from: '本次对话' }
   }
+  if (userCookie) return { value: userCookie, from: '本次对话（复用上一次的）' }
   return { value: '', from: '' }
 }
 
-// ---------------------------------------------------------------- 工具定义
+export function resetCookie() {
+  userCookie = ''
+}
 
 const HOW_TO_GET =
   '浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头（一整行，通常含 SESSION 等键）'
 
-const HOW_TO_GIVE = [
-  '在对话里贴一次（只在本次会话用，不落盘不提交）',
-  '或写进 ~/.dsh/.env：LANHU_COOKIE=<整行 cookie>',
-  '或写进 ~/.lanhu-cookie：整行 cookie',
-]
+const HOW_TO_GIVE = ['直接在对话里贴给我，我作为参数传给工具；只在本次会话内复用，不落盘、不写环境变量、不改配置']
 
 const SECURITY =
   'Cookie 等同登录态：不要写进代码、不要提交到仓库、不要在回复里回显（贴进来会自动打码，但别再抄出去）'
 
-/** 把「cookie 缺失/过期」做成一份可以直接照着问用户的载荷，而不是一句错误字符串。 */
+/** 缺 Cookie / Cookie 被拒时返回一份可以直接转述给用户的载荷，而不是一句错误字符串。 */
 function cookiePayload(kind, detail) {
-  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
-  const searched = [
-    'config.cookie（profile 的 cordis.patch.yml）',
-    '环境变量 LANHU_COOKIE',
-    `${join(home, '.env')} 里的 LANHU_COOKIE=...`,
-    `${join(process.cwd(), '.env')} 里的 LANHU_COOKIE=...`,
-    `${join(homedir(), '.lanhu-cookie')}（整份 cookie 一行）`,
-  ]
   const out = {
     ok: false,
     error: kind,
     askUser:
       kind === 'cookie-expired'
-        ? '认证被拒绝，用旧 Cookie 反复重试没用。把下面这段话和获取方法一起发给用户，等新 Cookie 再来。'
-        : '停在这里，向用户要 Cookie。不要猜、不要伪造、不要绕过 Cookie 直接凭想象编页面结构和样式。',
-    say: kind === 'cookie-expired'
-      ? '蓝湖拒绝访问：Cookie 过期，或当前账号没有这个项目的权限。请确认登录的账号，并重新给一份 Cookie。'
-      : '这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie。',
+        ? '认证被拒绝，拿旧 Cookie 反复重试没用。把这段话说给用户，等他给新的。'
+        : '停在这里向用户要 Cookie。不要猜、不要伪造、不要绕过它去凭想象编页面结构和样式。',
+    say:
+      kind === 'cookie-expired'
+        ? '蓝湖拒绝访问：Cookie 过期，或当前账号没有这个项目的权限。请确认登录的账号，并重新给我一份 Cookie。'
+        : '这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。',
     howToGet: HOW_TO_GET,
     howToGive: HOW_TO_GIVE,
-    afterFill: '配好后重新调用本工具即可，不需要重启。',
+    afterFill: '把 Cookie 贴过来之后我直接重跑，不需要重启、不用改任何配置。',
     security: SECURITY,
   }
   if (detail) out.detail = detail
-  if (kind !== 'cookie-expired') out.searched = searched
   return out
+}
+
+const COOKIE_PARAM = {
+  type: 'string',
+  description:
+    '用户在对话里给出的蓝湖 Cookie（整行）。唯一来源：没有就先按 missing-cookie 的说法问用户，' +
+    '不要从环境变量、配置文件、历史消息里找替代值。同一轮任务后续调用可省略，会复用。',
 }
 
 const SCREENS_PARAMS = {
@@ -103,6 +86,7 @@ const SCREENS_PARAMS = {
   additionalProperties: false,
   required: ['url'],
   properties: {
+    cookie: COOKIE_PARAM,
     url: {
       type: 'string',
       description: '蓝湖设计图链接（可含 #、pid、image_id、tid）。只接受设计图，不接受 PRD/Axure 链接。',
@@ -115,6 +99,7 @@ const BUILD_PARAMS = {
   additionalProperties: false,
   required: ['url'],
   properties: {
+    cookie: COOKIE_PARAM,
     url: { type: 'string', description: '蓝湖设计图链接。' },
     screens: {
       type: 'string',
@@ -122,7 +107,7 @@ const BUILD_PARAMS = {
     },
     out: {
       type: 'string',
-      description: '产物目录，相对会话工作目录或绝对路径。默认 design/<设计图名>。',
+      description: '产物目录，必须在会话工作目录内（默认 .lanhu-dds/<设计图名>-<id8>/）。不要指到工作区外。',
     },
     scale: { type: 'number', description: '强制缩放比（1/2/3）。默认按屏宽自动推断。' },
     unit: {
@@ -160,7 +145,7 @@ function describeError(error, hint) {
   return out
 }
 
-export function createScreensTool(getConfig) {
+export function createScreensTool() {
   return {
     name: 'lanhu_dds_screens',
     description:
@@ -170,7 +155,7 @@ export function createScreensTool(getConfig) {
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
-      const { value: cookie } = resolveCookie(getConfig())
+      const { value: cookie } = takeCookie(args)
       if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({ url: args.url, cookie, list: true })
@@ -224,7 +209,7 @@ export function createDoctorTool() {
   }
 }
 
-export function createBuildTool(getConfig) {
+export function createBuildTool() {
   return {
     name: 'lanhu_dds_build',
     description:
@@ -233,13 +218,13 @@ export function createBuildTool(getConfig) {
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
-      const config = getConfig()
-      const { value: cookie, from } = resolveCookie(config)
+      const { value: cookie, from } = takeCookie(args)
       if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({
           url: args.url,
           cookie,
+          root: process.cwd(),
           out: args.out,
           screens: args.screens ?? 'all',
           scale: args.scale,
@@ -285,11 +270,10 @@ export function readSkill(dir = SKILL_DIR) {
 // ---------------------------------------------------------------- 入口
 
 export function apply(ctx, config) {
-  const getConfig = () => config ?? {}
 
   for (const make of [createScreensTool, createBuildTool, createDoctorTool]) {
     try {
-      const dispose = ctx.tools.register(make(getConfig))
+      const dispose = ctx.tools.register(make())
       ctx.effect(() => dispose)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-lanhu-dds: 工具注册失败: ${error?.message ?? error}`)

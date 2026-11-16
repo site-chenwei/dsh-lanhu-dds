@@ -18,31 +18,26 @@ DDS（转代码）是蓝湖给的结构化产物：一棵带**画布绝对坐标
 
 ## 1. 准备：拿 Cookie
 
-只拉 DDS 树和参考图需要 Cookie，切图不需要。三种给法，优先级从高到低：
+只拉 DDS 树和参考图需要 Cookie，切图不需要。
 
-1. `--cookie "<值>"`
-2. 环境变量 `LANHU_COOKIE`
-3. 项目本地 `.env` 里的 `LANHU_COOKIE`（脚本不自动读，需你 `export`）
+**唯一来源：用户在对话里给出**。工具参数 `cookie` 就是它的全部入口——不读环境变量、不读 `.env`、不读配置文件。同一轮任务里第一次带上，后面可省略（进程内复用同一个值，不落盘）。
+
+- 工具返回 `missing-cookie` / `cookie-expired` 时，把里面的 `say` + `howToGet` 原样转给用户，然后**停**。不要伪造、不要换个接口绕、不要跳过选屏照裁图编代码——跳过 DDS 就没有几何和层级，出来的代码必然返工。
+- `cookie-expired` 还有另一种可能：账号本身没有这个项目权限。让用户确认登录的是哪个号，别让人反复重取。
+- 用户说「我配过了」时，直接回答「这里没有配置文件这条路」——只有把 Cookie 贴进对话这一条。旧版本支持过环境变量，导致过「配了却不生效」，已经删掉。
+- 用户贴进来后直接重跑刚才那个工具，不需要重启、不改配置。
 
 拿法：浏览器登录蓝湖 → F12 → Network → 任选一个 `lanhuapp.com` 请求 → 复制完整 `Cookie` 请求头。
-**Cookie 是凭据：不要写进代码、不要提交、不要在回复里回显。** 只放在环境变量或本地 `.env`（并确保 `.env` 在 `.gitignore` 里）。
+**Cookie 是凭据：不要写进代码、不要提交、不要在回复里回显。**
 
-### 工具说「没有 Cookie」时，照它说的停下来问
-
-工具会返回 `error: "missing-cookie"`（没配）或 `"cookie-expired"`（配了但被拒），并带 `say` / `howToGet` / `howToGive` / `searched`。处理方式固定：
-
-1. 把 `say` + `howToGet` + 三种给法**原样转给用户**，然后等。
-2. **不要伪造 Cookie、不要换个接口绕过去、不要跳过选屏直接照裁图编代码**——跳过 DDS 就没有几何和层级，出来的代码必然要返工。
-3. 用户说「我配过了」时，看返回里的 `searched`（工具实际查了哪些位置、解析成什么绝对路径），大概率是他配到了别的目录、或者变量名写成了 `LANHU-COOKIE`。
-4. 用户把 Cookie 贴进对话后，**直接重跑刚才那个工具**，不需要重启、不需要改配置。
-5. `cookie-expired` 还有一种可能：账号本身没有这个项目的权限。让用户确认登录的是哪个账号，别让人反复重取。
+命令行形态同一件事：`--cookie "<值>"`。
 
 ## 2. 选屏（必做）
 
 > 两种入口，产物完全一致：**环境里有 `lanhu_dds_screens` / `lanhu_dds_build` 工具**（装了 `dsh-lanhu-dds` 插件）就直接用工具，参数与下面的命令行一一对应；没有就跑本 Skill 目录下的脚本。下文用命令行为例。
 
 ```bash
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build --url "<蓝湖链接>" --out design/<页面名> --list
+node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build --url "<蓝湖链接>" --list
 ```
 
 输出每屏的 `index / 尺寸 / 节点数 / raster / title / texts`。读它，然后决定做第几屏：
@@ -57,8 +52,10 @@ node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build --url "<蓝湖
 
 ```bash
 node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build \
-  --url "<蓝湖链接>" --out design/<页面名> --screen 0
+  --url "<蓝湖链接>" --screen 0
 ```
+
+**产物目录是固定的，不要自己造**：默认落到 `<工作目录>/.lanhu-dds/<设计图名>-<id8>/`，同一页重跑会覆盖（先清空再写，不留上次的 `screen-3.*` 残骸）。`--out` 只能指到**工作目录内**，指到外面会被直接拒绝——中间产物不往工作区外写。
 
 产物（每屏一套）：
 

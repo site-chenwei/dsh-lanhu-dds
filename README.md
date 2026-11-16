@@ -44,21 +44,6 @@ lanhu_dds_doctor({ project: "/path/to/project" })
 
 `ready: false` 时不要开始还原——那正是模型自由发挥的地方。
 
-产物（每屏一套，落在工作区）：
-
-```
-design/<页面>/
-├── screen-0.png          # 从整张画布裁出的设计稿（视觉唯一真相）
-├── screen-0.ir.json      # 结构树：box / 文案 / 颜色 / 字号 / flex 语义
-├── screen-0.rects.json   # 扁平几何表，可直接和 DOM getBoundingClientRect 比对
-├── screen-0.html         # 绝对定位参考渲染（带 data-dds，可截图做像素 diff）
-├── screen-0.outline.md   # 缩进大纲 + 重复结构 → 组件候选
-├── tokens.css            # 颜色/字体 token（含 Windows 雅黑兜底）
-├── report.md             # 屏清单 + DDS 缺口告警
-├── screens.json / meta.json / dds.raw.json / reference.png
-└── assets/               # 切图 + manifest.json（不放蓝湖 CDN 地址）
-```
-
 ## 安装
 
 ### 方式 A：本地目录（开发/试装）
@@ -90,41 +75,45 @@ plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds" })
 
 把整个目录压成 zip 拷进内网，解压后用方式 A 装。安装时 pnpm 不会去拉任何依赖（`dependencies` 是空的），所以内网断网也能装。
 
-## 配置 Cookie
+## Cookie：唯一来源
 
-蓝湖 DDS 接口只需要登录态的 Cookie。按优先级：
+**只有一条路：用户在对话里把 Cookie 贴进来**，模型作为 `cookie` 参数传给工具。不读环境变量、不读 `.env`、不读配置文件——这个包以前支持过五级回退，结果最常见的故障是「我明明配了却不生效」，所以全删了。
 
-1. `config.cookie`（写在 patch 里，不推荐，会被提交）
-2. 环境变量 `LANHU_COOKIE`
-3. `$DSH_HOME/.env`（或 `~/.dsh/.env`）里的 `LANHU_COOKIE=...`
-4. `<工作目录>/.env` 里的 `LANHU_COOKIE=...`
-5. `~/.lanhu-cookie`（整份 cookie 一行）
+同一轮任务里带一次就够，后续调用复用同一个值（仅内存，进程结束即消失）。
 
-拿 Cookie：蓝湖网页登录 → F12 → Network → 任一 `lanhuapp.com` 请求 → 复制完整 `Cookie` 请求头。
-
-```yaml
-# profile 的 cordis.patch.yml：从环境变量注入，避免明文落盘
-- id: dsh-lanhu-dds
-  config:
-    cookie: !!js process.env.LANHU_COOKIE
-```
-
-没有 Cookie 时工具不会静默降级，而是返回一份可以直接照着问用户的载荷：
+没有 Cookie 时工具不会静默降级，返回一份可以直接照着问用户的载荷：
 
 ```json
 {
   "ok": false,
   "error": "missing-cookie",
-  "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie。",
+  "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。",
   "howToGet": "浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头",
-  "howToGive": ["在对话里贴一次", "或写进 ~/.dsh/.env", "或写进 ~/.lanhu-cookie"],
-  "searched": ["config.cookie", "环境变量 LANHU_COOKIE", "~/.dsh/.env", "<cwd>/.env", "~/.lanhu-cookie"]
+  "howToGive": ["直接在对话里贴给我，我作为参数传给工具；只在本次会话内复用，不落盘、不写环境变量、不改配置"],
+  "afterFill": "把 Cookie 贴过来之后我直接重跑，不需要重启、不用改任何配置。"
 }
 ```
 
-`searched` 是它**真的查过**的绝对路径——用户说「我配过了」时，对着这个列表就能看出配错了目录还是变量名写错。
+Cookie 过期或账号无权限时返回 `error: "cookie-expired"`（识别 `code 10089` 与 `HTTP 418 permission to access this project`），提示换新，而不是反复重试。
 
-Cookie 过期或账号无权限时返回 `error: "cookie-expired"`（识别 `code 10089` 与 `HTTP 418 permission to access this project`），提示换成重新取 Cookie 而不是反复重试。配好之后重跑同一个工具即可，不用重启。
+命令行形态同一件事：`--cookie "<值>"`。
+
+## 中间产物放哪
+
+固定落 `<工作目录>/.lanhu-dds/<设计图名>-<id8>/`，别自己指定到外面去（`--out` 指到工作区外会被拒绝）。同一页重跑先清空再写，不留上一轮的 `screen-N.*` 残骸。`project-rules.md` 里要把它写进 `.gitignore`——中间产物是可重新生成的证据，不是源码。
+
+```
+.lanhu-dds/我的订单-4a3b8460/
+├── screen-0.png          # 从整张画布裁出的设计稿（视觉唯一真相）
+├── screen-0.ir.json      # 结构树：box / 文案 / 颜色 / 字号 / flex 语义
+├── screen-0.rects.json   # 扁平几何表，可直接和 DOM getBoundingClientRect 比对
+├── screen-0.html         # 绝对定位参考渲染（带 data-dds，可截图做像素 diff）
+├── screen-0.outline.md   # 缩进大纲 + 重复结构 → 组件候选
+├── tokens.css            # 颜色/字体 token（含 Windows 雅黑兜底）
+├── report.md             # 屏清单 + DDS 缺口告警
+├── screens.json / meta.json / dds.raw.json / reference.png
+└── assets/               # 切图 + manifest.json（不放蓝湖 CDN 地址）
+```
 
 ## 为什么不用 lanhu-mcp
 
