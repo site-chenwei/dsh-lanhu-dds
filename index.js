@@ -30,7 +30,7 @@ export const inject = ['tools', 'skills']
 
 // ---------------------------------------------------------------- Cookie
 //
-// 唯一存放位置：lib 里的 COOKIE_FILE，默认 ~/.dsh/lanhu-cookie（0600）。
+// 唯一存放位置：lib 里的 COOKIE_FILE，默认 ~/.dsh-lanhu-dds/cookie（0600）。
 // 没有就向用户要；拿到后先真读一次设计图验证，通过才落盘；之后所有会话直接复用。
 // 不读环境变量、不读 .env、不读 config —— 只有一个位置，配没配、有没有过期，看这个文件就知道。
 
@@ -248,8 +248,8 @@ export function createBuildTool() {
   return {
     name: 'lanhu_dds_build',
     description:
-      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（含层级、屏内坐标、父相位移、间距、完整样式、切图像素尺寸、组合小图标预裁图与文案，单次 read 即可写代码）、' +
-      '设计稿裁图 screen-N.png、多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图。' +
+      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（自动折叠顶部状态栏/导航栏壳层并标注底部安全区占位，含屏内坐标、父相位移、间距、完整背景渐变与样式、切图像素尺寸、组合小图标预裁图与文案，单次 read 即可写代码）、' +
+      '设计稿裁图 screen-N.png、去壳精准配对的多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图（含 style.background 简写背景图）。' +
       '同一会话重跑部分 screens 时默认非破坏性增量合并，不会删掉已编译的其他屏与 reference.png。',
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },

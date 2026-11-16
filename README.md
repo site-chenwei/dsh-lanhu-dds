@@ -73,7 +73,7 @@ plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds" })
 ```bash
 # 第一次：工具说 missing-cookie，把 say 转给用户
 # 用户贴来 Cookie → 工具先真读一次设计图验证：
-#   通过 → 写入 ~/.dsh/lanhu-cookie，返回 cookieSavedTo，以后所有会话直接复用
+#   通过 → 写入 ~/.dsh-lanhu-dds/cookie，返回 cookieSavedTo，以后所有会话直接复用
 #   不通过 → 返回 cookie-expired，不落盘
 
 # 换号/排查：
@@ -89,7 +89,7 @@ lanhu_dds_doctor({ forget: true })
   "cookieFile": "/Users/you/.dsh-lanhu-dds/cookie",
   "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。",
   "howToGet": "浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头",
-  "howToGive": ["直接在对话里贴给我，我验证通过后会存到 ~/.dsh/lanhu-cookie（0600），以后所有会话都不必再贴"],
+  "howToGive": ["直接在对话里贴给我，我验证通过后会存到 ~/.dsh-lanhu-dds/cookie（0600），以后所有会话都不必再贴"],
   "whatHappensNext": "收到后我先用一个真实设计图验证能不能读，通过就存到 …（0600），以后所有会话都不用再贴；不通过我会告诉你，绝不存坏值。"
 }
 ```
