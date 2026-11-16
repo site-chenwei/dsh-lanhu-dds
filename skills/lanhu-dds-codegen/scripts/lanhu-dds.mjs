@@ -1383,11 +1383,25 @@ export function inspectUiLibrary(projectDir, pkgName) {
     if (components.length) break
   }
 
+  // 全局注册库（Vue 的 GlobalComponents 增强）：模板里直接写 <Button>，不用 import
+  let globalLib = false
+  for (const f of ['index.d.ts', 'es/index.d.ts', 'types/index.d.ts', 'global.d.ts']) {
+    try {
+      if (readFileSync(join(pkgDir, f), 'utf8').includes('GlobalComponents')) {
+        globalLib = true
+        break
+      }
+    } catch {
+      /* 没有这个文件就跳过 */
+    }
+  }
+
   return {
     ok: true,
     pkg: pkgName,
     version: pj.version ?? null,
     entry: entryRel ?? null,
+    global: globalLib,
     components: components.sort((x, y) => x.name.localeCompare(y.name)),
   }
 }
@@ -1416,10 +1430,15 @@ export function writeUiLibraryDoc(projectDir, info) {
   const dest = join(resolve(projectDir), UI_DOC_REL)
   mkdirSync(dirname(dest), { recursive: true })
   const rows = info.components.map((c) => {
-    const use = c.barrel ? `import { ${c.name} } from '${c.importPath}'` : `import ${c.name} from '${c.importPath}'`
+    const use = info.global
+      ? '全局注册，直接写标签'
+      : c.barrel
+        ? `import { ${c.name} } from '${c.importPath}'`
+        : `import ${c.name} from '${c.importPath}'`
     const props = c.props.length ? c.props.map((x) => '`' + x + '`').join(' ') : '（未解析到）'
     const from = c.props.length ? (c.propsFrom ?? '源码') : '无 .d.ts'
-    return `| \`<${c.name}>\` | \`${use}\` | ${props} | ${from} |`
+    const cell = info.global ? use : `\`${use}\``
+    return `| \`<${c.name}>\` | ${cell} | ${props} | ${from} |`
   })
   const md = `# 内网 UI 组件清单
 
@@ -1430,6 +1449,7 @@ export function writeUiLibraryDoc(projectDir, info) {
 - 包：\`${info.pkg}\`${info.version ? ` @ ${info.version}` : ''}
 - 入口：\`${info.entry ?? '（package.json 未声明 module/main）'}\`
 - 组件数：${info.components.length}
+- 注册方式：${info.global ? '全局注册（检测到 `GlobalComponents` 声明：`app.use(UI)` 之后模板里直接写标签，不用 import）' : '按需引入（下表「引入」列是入口导出的推断写法；若项目是 `app.use` 全量注册，以 project-rules.md 的注册方式为准）'}
 
 | 组件 | 引入 | 主要 props（启发式） | 依据 |
 |---|---|---|---|
