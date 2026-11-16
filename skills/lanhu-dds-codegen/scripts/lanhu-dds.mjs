@@ -922,19 +922,21 @@ export const COOKIE_FILE = join(DATA_HOME, 'cookie')
 export const SESSIONS_DIR = join(DATA_HOME, 'sessions')
 
 /**
- * 会话键：显式指定 > DSH 会话 id（exec.agent.id）> 环境变量 > CLI 时间戳+随机。
- * 目录名只留 [A-Za-z0-9_-]，截 12 位。
+ * 会话键：显式指定 > DSH 会话 id（exec.agent.id）> 环境变量 > 按当前目录的短哈希。
+ * 命令行没有会话概念，用 cwd 哈希可以让同一项目的多次运行复用同一个会话目录。
  */
 export function sessionKey(explicit, exec) {
-  const raw = explicit || exec?.agent?.id || process.env.DSH_SESSION_ID
-  if (raw) {
-    const key = String(raw).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 12)
+  // 显式名保留成可读的 slug；DSH 会话 id 形如 session-<uuid>，去掉前缀只留 12 位十六进制
+  if (explicit) {
+    const name = String(explicit).replace(/[\\/:*?"<>|\s]+/g, '-').replace(/^[.-]+|[.-]+$/g, '').slice(0, 24)
+    if (name) return name
+  }
+  const derived = exec?.agent?.id || process.env.DSH_SESSION_ID
+  if (derived) {
+    const key = String(derived).replace(/^session-/, '').replace(/[^A-Za-z0-9]/g, '').slice(0, 12)
     if (key) return key
   }
-  const d = new Date()
-  const two = (n) => String(n).padStart(2, '0')
-  const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}`
-  return `cli-${stamp}-${Math.random().toString(36).slice(2, 5)}`
+  return `cli-${createHash('sha1').update(resolve(process.cwd())).digest('hex').slice(0, 6)}`
 }
 
 export function sessionDir(explicit, exec) {
