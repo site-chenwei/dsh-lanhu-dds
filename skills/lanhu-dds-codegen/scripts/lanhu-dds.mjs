@@ -1203,11 +1203,16 @@ export function diagnoseProject(projectDir = process.cwd()) {
     if (rules.unfilled.length) todos.push(`project-rules.md 有 ${rules.unfilled.length} 项空着没填：${rules.unfilled.slice(0, 8).join('、')}${rules.unfilled.length > 8 ? '…' : ''}`)
     if (rules.placeholders) todos.push(`project-rules.md 里还有 ${rules.placeholders} 处示例占位（（如 …）/（内网 …）），换成真实内容或整段删掉`)
   }
+  const ui = readUiLibrary(dir)
   if (internalPackages.length) {
-    if (!existsSync(join(dir, UI_DOC_REL))) {
-      todos.push(`内网 UI 库清单还没生成：跑 doctor --ui（会扫 node_modules 里的真实组件，写到 ${UI_DOC_REL}）`)
+    if (!ui.present) {
+      todos.push(
+        `没有 ${UI_DOC_REL}：先跑 doctor --ui。扫不出组件（库没装 / 只发 dist 兼容层 / 组件不在约定目录）就停下来问用户要——包名+版本、常用组件清单，或一段真实用法示例，然后按模板手写这张表。**不要凭包名猜 API。**`
+      )
+    } else if (!ui.usable) {
+      todos.push(`UI 清单不可用（${ui.components} 个组件，${ui.withProps} 个解析到 props）：${ui.askUser ?? '跟用户确认这些组件的真实用法'}`)
     }
-    todos.push(`识别到内网包：${internalPackages.join('、')} —— 组件清单见 ${UI_DOC_REL}，没收录的再去 node_modules 翻`)
+    todos.push(`识别到内网包：${internalPackages.join('、')} —— 出码前先看 ${UI_DOC_REL}，表里没有的再到 node_modules 翻源码`)
   } else if (deps.includes('vant')) {
     todos.push('只看到公共 vant，没识别到内网 UI 库：确认内网库包名，填进 project-rules.md')
   }
@@ -1245,6 +1250,7 @@ export function diagnoseProject(projectDir = process.cwd()) {
     unit: unit ?? 'design',
     unitFrom: unitFrom ?? '未找到配置，默认 750 设计稿',
     rules,
+    ui,
     strays,
     todos,
     ready: todos.length === 0,
@@ -1272,25 +1278,43 @@ const SKIP_DIRS = /^(node_modules|\.\w|es|lib|dist|src|build|cjs|mjs|umd|types|t
 
 const pascal = (s) => s.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('')
 
-/** 从 .d.ts 里抠出 Props 接口的字段名（尽力而为，抠不到就留空）。 */
+const NOISE_PROP = /^(class|style|innerHTML|ref|key|slots?|scopedSlots|attrs|children|on[A-Z]\w*)$/
+
+/** 从 .d.ts / .ts / .vue 里抠 props 字段名；from 记录取自哪个文件，解析不到就是 null。 */
 function propsOf(dir) {
-  const files = (() => { try { return readdirSync(dir).filter((f) => f.endsWith('.d.ts')) } catch { return [] } })()
-  const texts = files.map((f) => { try { return readFileSync(join(dir, f), 'utf8') } catch { return '' } })
+  let files = []
+  try {
+    files = readdirSync(dir).filter((f) => /\.(d\.ts|ts|vue)$/.test(f))
+  } catch {
+    return { props: [], from: null }
+  }
   const keys = new Set()
-  for (const t of texts) {
-    for (const m of t.matchAll(/interface\s+\w*(?:Props|Options)\w*\s*(?:extends[^{]*)?\{([\s\S]*?)\n\}/g)) {
-      for (const line of m[1].split('\n')) {
-        const k = line.match(/^\s{2,}([A-Za-z_$][\w$]*)\??\s*:/)
-        if (k) keys.add(k[1])
+  let from = null
+  for (const f of files) {
+    let t = ''
+    try {
+      t = readFileSync(join(dir, f), 'utf8')
+    } catch {
+      continue
+    }
+    const bodies = []
+    for (const m of t.matchAll(/(?:interface|type)\s+\w*(?:Props|Options|Attrs)\w*\s*(?:=\s*)?(?:extends[^{]*)?\{([\s\S]*?)\n\}/g)) bodies.push(m[1])
+    for (const m of t.matchAll(/defineProps\s*<\s*\{([\s\S]*?)\}\s*>/g)) bodies.push(m[1])
+    for (const body of bodies) {
+      for (const line of body.split('\n')) {
+        const k = line.match(/^\s+([A-Za-z_$][\w$]*)\??\s*[:(]/)
+        if (!k || NOISE_PROP.test(k[1])) continue
+        keys.add(k[1])
       }
     }
+    if (keys.size && !from) from = f
   }
-  return [...keys].slice(0, 12)
+  return { props: [...keys].slice(0, 12), from }
 }
 
 /**
- * 扫内网 UI 库的安装产物，列出真实组件名与（尽力而为的）props。
- * 组件清单是确定信息（目录结构），props 是启发式，文档里会标出来。
+ * 扫内网 UI 库安装产物。名字优先取入口 barrel 的导出名（可信），
+ * 没有 barrel 才退回目录名（只能算线索，文档里标出依据）。
  */
 export function inspectUiLibrary(projectDir, pkgName) {
   const project = resolve(projectDir)
@@ -1298,75 +1322,131 @@ export function inspectUiLibrary(projectDir, pkgName) {
   if (!existsSync(pkgDir)) return { ok: false, error: `没有安装 ${pkgName}（查 ${pkgDir}）` }
 
   let pj = {}
-  try { pj = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')) } catch { /* 保持空 */ }
-  const roots = ['es', 'lib', 'dist', 'components', 'src'].filter((r) => existsSync(join(pkgDir, r)))
-  const comps = []
-  for (const root of [...roots, '.']) {
+  try {
+    pj = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
+  } catch {
+    /* 读不到就当没声明 */
+  }
+
+  const entryRel = [pj.module, pj.main, 'index.mjs', 'index.js', 'es/index.js', 'lib/index.js']
+    .filter(Boolean)
+    .find((f) => existsSync(join(pkgDir, f)))
+
+  const entryDir = entryRel ? dirname(entryRel) : '.'
+  const exported = new Map()
+  if (entryRel) {
+    let t = ''
+    try {
+      t = readFileSync(join(pkgDir, entryRel), 'utf8')
+    } catch {
+      /* 读不出来就没有导出名 */
+    }
+    for (const m of t.matchAll(/export\s*\{([^}]*)\}\s*from\s*['"]\.\/([\w./-]+)['"]/g)) {
+      for (const part of m[1].split(',')) {
+        const [orig, alias] = part.trim().split(/\s+as\s+/)
+        const name = (alias ?? orig ?? '').trim()
+        if (!/^[A-Za-z_$][\w$]*$/.test(name) || name === 'default') continue
+        if (!exported.has(name)) exported.set(name, m[2])
+      }
+    }
+    for (const m of t.matchAll(/export\s+(?:const|function|class)\s+([A-Z][\w]*)/g)) {
+      if (!exported.has(m[1])) exported.set(m[1], null)
+    }
+  }
+
+  const components = []
+  const covered = new Set()
+  for (const [name, sub] of exported) {
+    const parsed = sub ? propsOf(join(pkgDir, entryDir, sub)) : { props: [], from: null }
+    components.push({ name, sub: sub ?? null, importPath: pkgName, barrel: true, props: parsed.props, propsFrom: parsed.from })
+    if (sub) covered.add(sub.split('/')[0])
+  }
+
+  for (const root of ['components', 'es', 'lib', 'dist', 'src', '.']) {
     const base = root === '.' ? pkgDir : join(pkgDir, root)
     let entries = []
-    try { entries = readdirSync(base, { withFileTypes: true }) } catch { continue }
+    try {
+      entries = readdirSync(base, { withFileTypes: true })
+    } catch {
+      continue
+    }
     for (const e of entries) {
       if (!e.isDirectory() || SKIP_DIRS.test(e.name)) continue
       const d = join(base, e.name)
       if (!['index.js', 'index.mjs', 'index.cjs', 'index.d.ts'].some((f) => existsSync(join(d, f)))) continue
-      comps.push({ name: pascal(e.name), dir: root === '.' ? e.name : `${root}/${e.name}`, props: propsOf(d) })
+      const sub = root === '.' ? e.name : `${root}/${e.name}`
+      if (covered.has(e.name) || covered.has(sub)) continue
+      covered.add(e.name)
+      const parsed = propsOf(d)
+      components.push({ name: pascal(e.name), sub, importPath: `${pkgName}/${sub}`, barrel: false, props: parsed.props, propsFrom: parsed.from })
     }
-    if (comps.length) break
+    if (components.length) break
   }
 
-  // 兜底：库把组件平铺进一个 barrel 文件（export { default as Button } from './button'）
-  if (!comps.length) {
-    const entryFile = [pj.module, pj.main, 'index.js', 'es/index.js', 'lib/index.js'].filter(Boolean)
-      .map((f) => join(pkgDir, f)).find((f) => existsSync(f))
-    if (entryFile) {
-      try {
-        const barrel = readFileSync(entryFile, 'utf8')
-        const seen = new Set()
-        for (const m of barrel.matchAll(/from\s+['"]\.\/([\w-]+)['"]/g)) {
-          const name = pascal(m[1])
-          if (seen.has(name)) continue
-          seen.add(name)
-          comps.push({ name, dir: m[1], props: propsOf(join(dirname(entryFile), m[1])) })
-        }
-      } catch { /* 读不出来就返回空 */ }
-    }
-  }
   return {
     ok: true,
     pkg: pkgName,
     version: pj.version ?? null,
-    entry: pj.module ?? pj.main ?? null,
-    components: comps.sort((a, b) => a.name.localeCompare(b.name)),
+    entry: entryRel ?? null,
+    components: components.sort((x, y) => x.name.localeCompare(y.name)),
   }
 }
 
-/** 把组件清单写成 markdown，落到项目的 Skill 目录里，模型出码前会先读它。 */
+/** 出码前检查现有清单够不够用；不够就给出「该向用户要什么」。 */
+export function readUiLibrary(projectDir) {
+  const path = join(resolve(projectDir), UI_DOC_REL)
+  if (!existsSync(path)) {
+    return { present: false, path, pkg: null, components: 0, withProps: 0, placeholder: false, usable: false, askUser: null }
+  }
+  const t = readFileSync(path, 'utf8')
+  const rows = t.split('\n').filter((l) => /^\|\s*`<[^>]+>`/.test(l))
+  const components = rows.length
+  const withProps = components - (t.match(/（未解析到）/g) ?? []).length
+  const placeholder = /（待填|TODO\(接入\)|（示例组件）/.test(t)
+  const pkg = (t.match(/- 包：`([^`]+)`/) ?? [])[1] ?? null
+  const usable = components > 0 && withProps > 0 && !placeholder
+  let askUser = null
+  if (!components) askUser = 'ui-library.md 是空表。向用户要：内网 UI 库包名、常用组件清单（或一段真实用法示例、内部文档链接），拿到后按表补全。'
+  else if (!withProps) askUser = `ui-library.md 里 ${components} 个组件一个 props 都没解析到。问用户要这些组件的常用 props 和一段真实用法示例，别猜。`
+  else if (placeholder) askUser = 'ui-library.md 里还有（待填）之类占位，跟用户确认是删掉还是补齐。'
+  return { present: true, path, pkg, components, withProps, placeholder, usable, askUser }
+}
+
 export function writeUiLibraryDoc(projectDir, info) {
   const dest = join(resolve(projectDir), UI_DOC_REL)
   mkdirSync(dirname(dest), { recursive: true })
-  const rows = info.components.map((c) => `| \`<${c.name}>\` | \`${info.pkg}/${c.dir}\` | ${c.props.length ? c.props.map((p) => '`' + p + '`').join(' ') : '（未解析到，看源码）'} |`)
-  const md = `# 内网 UI 组件清单（自动生成）
+  const rows = info.components.map((c) => {
+    const use = c.barrel ? `import { ${c.name} } from '${c.importPath}'` : `import ${c.name} from '${c.importPath}'`
+    const props = c.props.length ? c.props.map((x) => '`' + x + '`').join(' ') : '（未解析到）'
+    const from = c.props.length ? (c.propsFrom ?? '源码') : '无 .d.ts'
+    return `| \`<${c.name}>\` | \`${use}\` | ${props} | ${from} |`
+  })
+  const md = `# 内网 UI 组件清单
 
-> 由 \`lanhu-dds doctor --ui\` 扫 \`node_modules/${info.pkg}\` 生成，**不要手改**——库升级后重跑覆盖。
-> 组件名与目录是确定的；最后一列 props 是从 \`.d.ts\` 里尽力解析的，**不确定的去看源码，别猜**。
-> 生成时间信息不写在这里，避免无意义的 diff。
+> 由 \`lanhu-dds doctor --ui\` 扫 \`node_modules/${info.pkg}\` 生成，库升级后重跑覆盖。
+> 组件名取自入口文件导出（可信）；没有入口 barrel 时退回目录名，「依据」列会标出文件。
+> props 只是从 \`.d.ts\` 抠出来的**字段名**，没有类型和默认值 —— 不确定就去看源码，别猜。
 
 - 包：\`${info.pkg}\`${info.version ? ` @ ${info.version}` : ''}
 - 入口：\`${info.entry ?? '（package.json 未声明 module/main）'}\`
 - 组件数：${info.components.length}
 
-| 组件 | 导入路径 | 主要 props（启发式） |
-|---|---|---|
+| 组件 | 引入 | 主要 props（启发式） | 依据 |
+|---|---|---|---|
 ${rows.join('\n')}
 
 ## 怎么用
 
 1. 出码前先在这张表里找有没有现成组件（按钮 / 单元格 / 标签 / 弹层 / 空态 / 骨架屏…）。
-2. 有 → 直接用，样式用库的 CSS 变量或 \`:deep()\` 覆盖。
-3. 没有 → 才手写，并在此文件末尾追加一行「缺 XXX，已手写」，方便后续反馈给库维护者。
+2. 有 → 直接用，样式走库的 CSS 变量或 \`:deep()\` 局部覆盖。
+3. 没有 → 才手写，并在下面登记，方便反馈给库维护者。
+
+## 缺组件登记
+
+（手写替代的记这里：组件名 — 用在哪 — 为什么没复用）
 `
   writeFileSync(dest, md)
-  return { ok: true, path: dest, components: info.components.length }
+  return { ok: true, path: dest, components: info.components.length, withProps: info.components.filter((c) => c.props.length).length }
 }
 
 function cmdDoctor(args) {

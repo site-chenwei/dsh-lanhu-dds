@@ -28,6 +28,7 @@ lanhu_dds_doctor({ project: "/path/to/project", init: true })
 
 # 2. 扫内网 UI 库 → ui-library.md（真实组件名 + 导入路径 + 尽力解析的 props）
 lanhu_dds_doctor({ project: "/path/to/project", ui: true })
+#    扫不出东西（库没装 / 只发 dist / 没有 .d.ts）时，doctor 的 ui.askUser 会告诉你该问用户什么
 
 # 3. 人工填规范里剩下的空格：技术栈 / 目录 / token / 字体 / 数据层
 # 4. 再查一次，直到 ready: true
@@ -107,7 +108,7 @@ lanhu_dds_doctor({ forget: true })
 
 ## 中间产物放哪
 
-全部落在 **`~/.dsh-lanhu-dds/`**，项目里不留任何东西：
+产物全部落在 **`~/.dsh-lanhu-dds/`**（换个 `DSH_LANHU_DDS_HOME` 也行），不进项目：
 
 ```
 ~/.dsh-lanhu-dds/
@@ -119,7 +120,16 @@ lanhu_dds_doctor({ forget: true })
     ├── ...
 ```
 
-`out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。因为不在项目里，**不需要 gitignore**；反过来说，项目里出现 `.agents/tmp/`、`dump-*.mjs`、`design/dds/` 这类残留就是错的，`lanhu_dds_doctor` 会扫出来报 `strays`。
+`out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。产物不在项目里，**不需要 gitignore**。
+
+项目里只该多出两个文件，都该提交：
+
+| 文件 | 是什么 |
+|---|---|
+| `.agents/skills/lanhu-dds-codegen/project-rules.md` | 项目规范（技术栈 / 目录 / token / 字体 / 数据层） |
+| `.agents/skills/lanhu-dds-codegen/ui-library.md` | 内网 UI 组件清单（`doctor --ui` 生成，库升级重跑） |
+
+其余的 `.agents/tmp/`、`dump-*.mjs`、`design/dds/`、`screen-*.json` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`。
 
 每屏产物：
 

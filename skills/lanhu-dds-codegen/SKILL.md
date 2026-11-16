@@ -58,9 +58,17 @@ node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build \
   --url "<蓝湖链接>" --screen 0
 ```
 
-**产物目录是固定的，不要自己造，也不要往项目里写任何东西**：默认落到 `~/.dsh-lanhu-dds/<设计图名>-<id8>/`（可用 `DSH_LANHU_DDS_HOME` 改根），同一页重跑先清空再写。`--out` / `out` 只接受**一层目录名**（如 `订单列表`），带斜杠或 `..` 一律拒绝。
+**产物目录固定，不要自己造**：默认落到 `~/.dsh-lanhu-dds/<设计图名>-<id8>/`（可用 `DSH_LANHU_DDS_HOME` 改根），同一页重跑先清空再写。`--out` / `out` 只接受**一层目录名**（如 `订单列表`），带斜杠或 `..` 一律拒绝。**产物本身不进项目**——它是可重新生成的证据，不是源码。
 
-**不要在项目里建临时脚本或 dump 文件**。常见错误是在项目里写 `.agents/tmp/dump-ir.mjs` 去打印 IR——那会把中间产物污染进业务仓库。IR/rects 直接用 `jq`、`node -e`、`cat` 读；确实需要落一个临时脚本时，写到 `~/.dsh-lanhu-dds/tmp/`。`lanhu_dds_doctor` 会扫出项目里残留的这类文件（返回 `strays`）并要求清掉。
+**项目里该写什么，分两类**：
+
+| 该写（接入件，应提交） | 不该写（都是污染） |
+|---|---|
+| `.agents/skills/lanhu-dds-codegen/project-rules.md` —— 项目规范，一次填好长期用 | 产物拷贝：`design/dds/`、`screen-*.json`、`.lanhu-dds/` |
+| `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单，库升级重生成 | 临时脚本：`.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、根目录 `dump-*.json` |
+| 你要交付的业务代码 | 猜出来的中间态文件（`tmp`、`scratch`、`test2.js`） |
+
+要读 IR/rects 就直接 `jq`、`node -e`、`cat`，不用落脚本；确实需要一个临时脚本时写到 `~/.dsh-lanhu-dds/tmp/`。`lanhu_dds_doctor` 会把不该写的扫出来（返回 `strays`）。
 
 产物（每屏一套）：
 
@@ -106,13 +114,22 @@ node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor
 
 - 输出 `ready: true` → 直接开工。
 - 有 `未接入` 或一堆空格 → 先补 `project-rules.md`（`doctor --init` 生成模板）。**不要拿模板里的示例当项目规范**，那些 `@company/ui`、`UiButton` 是占位，照着写就是编。
-- 提示「UI 库清单还没生成」→ 跑 `doctor --ui`，它扫 `node_modules` 写出 `ui-library.md`（真实组件名 + 导入路径 + 尽力解析的 props）。**这份清单是出码时"有没有现成组件"的唯一依据**，不要凭想象写 `<Button>`。
+
+**UI 规范接入的三步（doctor 已经带运行时检测，`ui` 字段就是它的结论）**：
+
+| `ui` 字段 | 含义 | 你该做什么 |
+|---|---|---|
+| `present: false` | 没有 `ui-library.md` | 跑 `doctor --ui` 扫 `node_modules` 生成 |
+| `usable: true` | 有清单、组件和人话都够用 | 直接用，出码前先在这张表里查 |
+| `usable: false` + `askUser` | 生成不出可用内容（库没装 / 只发 dist / 没有 `.d.ts`） | **停下来向用户要**：包名+版本、常用组件清单、一段真实用法示例、或内部文档链接；拿到后按模板补全这张表 |
+
+`ui.askUser` 里已经写好了该问什么，直接照它问，别自己另编一套。**任何情况下都不要凭包名猜组件 API**——`<Button>` 有 `type` 还是 `variant`、有没有 `block`，只有源码或用户知道。
 
 然后按顺序找项目自己的规矩，读到什么就遵守什么：
 
 1. 根目录 `AGENTS.md` / `CLAUDE.md` / `.cursor/rules` / `README` 里的开发约定
 2. `.agents/` 下的笔记与规范（`.agents/notes/`、`.agents/skills/`）
-3. 组件库与样式方案：**先读 `.agents/skills/lanhu-dds-codegen/ui-library.md`**（`doctor --ui` 生成的真实组件清单，比文档新）。没有这个文件就去看 `package.json` 里的内网包名，去 `node_modules/<包>/es/` 翻；再看 `src/components/`、`tailwind.config.*`、`*.module.css`、`theme.ts`、`variables.scss`
+3. 组件库与样式方案：**先读 `.agents/skills/lanhu-dds-codegen/ui-library.md`**（真实组件清单，比文档新）；表里 props 是空的那几个，去 `node_modules/<包>/**/index.d.ts` 或 `.vue` 文件里看真实签名，仍然读不出就问用户。再看 `src/components/`、`tailwind.config.*`、`*.module.css`、`theme.ts`、`variables.scss`
 4. **同类页面的既有实现**（最重要）：找一个已经在线上、结构和本屏接近的页面，读它的取数、样式组织、埋点、路由注册方式
 5. `package.json`：框架、UI 库、CSS 方案、路径别名、lint 规则
 6. **构建配置里的单位基准**（决定产物单位对不对）：
@@ -243,8 +260,9 @@ console.table(bad);
 4. **引用了蓝湖 CDN 图片地址**：会过期，必须用 `assets/` 里的本地文件。
 5. **跳过第 5 步**：产出和项目代码风格格格不入，评审直接打回。
 6. **一次性生成整页巨型组件**：先按 outline 拆，再填内容。
-7. **在项目里写临时脚本/产物**：`.agents/tmp/dump-ir.mjs`、`design/dds/`、根目录的 `dump-*.json` 都不该出现。产物在 `~/.dsh-lanhu-dds`，临时脚本在 `~/.dsh-lanhu-dds/tmp`，项目里只有你要交付的代码。
-8. **把 `&nbsp;` 当真文本**：DDS 的文案里有 HTML 实体，脚本已经解码过，别再手动转一次。
+7. **把污染源当交付**：`.agents/tmp/dump-ir.mjs`、`design/dds/`、根目录 `dump-*.json` 都不该出现。产物在 `~/.dsh-lanhu-dds`，临时脚本在 `~/.dsh-lanhu-dds/tmp`；项目里只留 `project-rules.md`、`ui-library.md` 和业务代码。
+8. **凭包名猜 UI 组件 API**：`ui-library.md` 里 props 是空的就停下问用户要（或读源码），不要按 Vant 的名字硬套内网库。
+9. **把 `&nbsp;` 当真文本**：DDS 的文案里有 HTML 实体，脚本已经解码过，别再手动转一次。
 
 ## 10. 两种运行方式（等价）
 

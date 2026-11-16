@@ -80,15 +80,24 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 
 `lanhu-dds-codegen` 生成的 `tokens.css` 是候选值，**不直接引入项目**，只用来和项目 token 做映射。
 
-## 3.5 中间产物（不进项目）
+## 3.5 项目里放什么（接入件 vs 污染）
 
-蓝湖还原的产物（裁图 / IR / 几何表 / 参考 HTML / 切图）和 Cookie 统一在 **`~/.dsh-lanhu-dds/`**，不在项目里，所以**不需要 gitignore 任何东西**。
+这个 Skill 只在项目里写**两个文件**，都该提交：
 
-项目里不允许出现：
-- `.agents/tmp/`、`tmp/`、`scratch/` 之类的临时目录
-- `dump-*.mjs`、`probe-*.mjs`、`screen-*.ir.json` 之类的中间文件
+- `.agents/skills/lanhu-dds-codegen/project-rules.md` —— 本文
+- `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单（`doctor --ui` 生成，库升级后重跑）
 
-需要临时脚本就去 `~/.dsh-lanhu-dds/tmp/`。`lanhu_dds_doctor` 会扫这些残留并报出来。
+**产物不进项目**：裁图 / IR / 几何表 / 参考 HTML / 切图 / Cookie 全在 `~/.dsh-lanhu-dds/`（`DSH_LANHU_DDS_HOME` 可改根），所以不需要 gitignore 任何东西。
+
+**项目里不允许出现**（`doctor` 会扫出来报 `strays`）：
+
+| 类别 | 例子 |
+|---|---|
+| 产物拷贝 | `design/dds/`、`.lanhu-dds/`、`screen-*.ir.json` |
+| 临时脚本 | `.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、`scratch/`、`tmp/` |
+| 手搓的中间态 | 根目录 `dump-*.json`、`test2.js` |
+
+要读 IR 就 `jq` / `node -e` / `cat`；确实需要一个临时脚本，写到 `~/.dsh-lanhu-dds/tmp/`。
 
 ## 4. 字体
 
