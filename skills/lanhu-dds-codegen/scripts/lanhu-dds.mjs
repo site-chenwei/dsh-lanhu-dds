@@ -1106,7 +1106,7 @@ export async function buildDesign({
     })
   }
   const key = sessionKey(session, exec)
-  return { ok: true, session: key, tmpDir: join(SESSIONS_DIR, key, 'tmp'), outDir, canvas, scale, screens: descs, built, reference: Boolean(refPng) }
+  return { ok: true, session: key, tmpDir: sessionTmp(session, exec), outDir, canvas, scale, screens: descs, built, reference: Boolean(refPng) }
 }
 
 // ---------------------------------------------------------------- 命令
