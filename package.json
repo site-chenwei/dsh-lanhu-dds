@@ -1,0 +1,54 @@
+{
+  "name": "dsh-lanhu-dds",
+  "version": "0.1.0",
+  "description": "Lanhu DDS (design-to-code) tools and skill for DeepSeek Harness: fetch DDS layout trees, compile pixel-accurate screen artifacts, crop reference images — all in zero-dependency Node.",
+  "icon": "icon.svg",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "skills",
+    "locale",
+    "docs",
+    "icon.svg",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "lanhu",
+    "lanhuapp",
+    "dds",
+    "design-to-code",
+    "figma",
+    "pixel-perfect",
+    "ui-restore"
+  ],
+  "author": "site-chenwei",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/site-chenwei/dsh-lanhu-dds.git"
+  },
+  "homepage": "https://github.com/site-chenwei/dsh-lanhu-dds#readme",
+  "bugs": {
+    "url": "https://github.com/site-chenwei/dsh-lanhu-dds/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

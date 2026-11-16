@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Lanhu DDS",
+    "description": "Turn Lanhu design screens into code-ready artifacts: DDS layout IR, pixel geometry, reference crops and a restore skill. No lanhu-mcp, no Python.",
+    "detail": "docs/DETAIL.md"
+  }
+}

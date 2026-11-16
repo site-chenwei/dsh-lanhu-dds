@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "蓝湖 DDS 还原",
+    "description": "把蓝湖设计图编译成可写代码的产物：DDS 结构 IR、像素几何表、设计稿裁图与还原 Skill。不需要 lanhu-mcp、不需要 Python。",
+    "detail": "docs/DETAIL.md"
+  }
+}

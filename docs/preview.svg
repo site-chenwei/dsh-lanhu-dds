@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="300" viewBox="0 0 640 300">
+  <rect width="640" height="300" fill="#ffffff"/>
+  <!-- left: the design board with several phone screens -->
+  <rect x="40" y="60" width="28" height="180" rx="4" fill="#e3eaf2"/>
+  <rect x="74" y="52" width="28" height="196" rx="4" fill="#cfe0f0"/>
+  <rect x="108" y="64" width="28" height="172" rx="4" fill="#e3eaf2"/>
+  <rect x="142" y="58" width="28" height="184" rx="4" fill="#cfe0f0"/>
+  <rect x="176" y="70" width="28" height="160" rx="4" fill="#e3eaf2"/>
+  <rect x="40" y="240" width="164" height="3" rx="1.5" fill="#c8d3de"/>
+
+  <!-- arrow -->
+  <path d="M216 150h48" stroke="#247bbf" stroke-width="3" stroke-linecap="round"/>
+  <path d="M258 142l10 8-10 8" fill="none" stroke="#247bbf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- middle: the compiled artifacts stack -->
+  <rect x="280" y="64" width="96" height="176" rx="6" fill="#ffffff" stroke="#247bbf" stroke-width="2"/>
+  <rect x="292" y="78" width="72" height="8" rx="3" fill="#247bbf"/>
+  <rect x="292" y="94" width="52" height="6" rx="3" fill="#cfe0f0"/>
+  <rect x="292" y="108" width="72" height="30" rx="4" fill="#eef4fa"/>
+  <rect x="292" y="146" width="72" height="30" rx="4" fill="#eef4fa"/>
+  <rect x="292" y="184" width="72" height="30" rx="4" fill="#eef4fa"/>
+  <rect x="300" y="114" width="16" height="16" rx="3" fill="#f0c14b"/>
+  <rect x="300" y="152" width="16" height="16" rx="3" fill="#f0c14b"/>
+  <rect x="300" y="190" width="16" height="16" rx="3" fill="#f0c14b"/>
+
+  <!-- arrow -->
+  <path d="M388 150h44" stroke="#247bbf" stroke-width="3" stroke-linecap="round"/>
+  <path d="M424 142l10 8-10 8" fill="none" stroke="#247bbf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- right: component code blocks -->
+  <rect x="448" y="76" width="152" height="24" rx="5" fill="#eef4fa"/>
+  <rect x="456" y="82" width="40" height="6" rx="3" fill="#247bbf"/>
+  <rect x="502" y="82" width="60" height="6" rx="3" fill="#c8d3de"/>
+  <rect x="464" y="112" width="128" height="40" rx="5" fill="#f7fafd" stroke="#dbe6f0" stroke-width="1.5"/>
+  <rect x="472" y="120" width="14" height="24" rx="3" fill="#f0c14b"/>
+  <rect x="494" y="122" width="66" height="6" rx="3" fill="#247bbf"/>
+  <rect x="494" y="134" width="42" height="6" rx="3" fill="#c8d3de"/>
+  <rect x="464" y="162" width="128" height="40" rx="5" fill="#f7fafd" stroke="#dbe6f0" stroke-width="1.5"/>
+  <rect x="472" y="170" width="14" height="24" rx="3" fill="#f0c14b"/>
+  <rect x="494" y="172" width="66" height="6" rx="3" fill="#247bbf"/>
+  <rect x="494" y="184" width="42" height="6" rx="3" fill="#c8d3de"/>
+  <rect x="464" y="212" width="86" height="6" rx="3" fill="#c8d3de"/>
+</svg>

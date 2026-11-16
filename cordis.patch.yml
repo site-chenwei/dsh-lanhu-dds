@@ -1,0 +1,6 @@
+# dsh-lanhu-dds：把蓝湖 DDS 还原能力装进 DSH。
+# 只插自己这一行，不改动任何既有行，所以不需要 inject 其它服务。
+- insert:
+    - id: dsh-lanhu-dds
+      name: dsh-lanhu-dds
+      config: {}
