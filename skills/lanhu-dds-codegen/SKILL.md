@@ -49,17 +49,17 @@ Cookie 唯一存放路径：**`~/.dsh-lanhu-dds/cookie`**（可用 `DSH_LANHU_DD
 
 1. **文件存在 → 自动复用**，无需询问用户。
 2. **文件不存在 → 工具返回 `missing-cookie`**：把返回里的 `say` + `howToGet` 转述给用户（可用 `ask_user_question`）并停下等待。不要伪造、不要盲写页面。
-3. **用户贴回 Cookie → 先验证再落盘**：传给 `lanhu_dds_screens` 或 `lanhu_dds_build` 的 `cookie` 参数（CLI 为 `--cookie "<值>"`），工具真读一次设计图验证通过后自动写入 `~/.dsh-lanhu-dds/cookie`；若返回 `cookie-expired` 则提示用户更换有效 Cookie，工具不落盘坏值。
+3. **用户贴回 Cookie → 先验证再落盘**：传给 `lanhu_dds_screens` 或 `lanhu_dds_build` 的 `cookie` 参数，工具真读一次设计图验证通过后自动写入 `~/.dsh-lanhu-dds/cookie`；若返回 `cookie-expired` 则提示用户更换有效 Cookie，工具不落盘坏值。
 
 获取方式：浏览器登录蓝湖 → F12 → Network → 任一 `lanhuapp.com` 请求 → 复制完整 `Cookie` 请求头。
 **安全红线**：严禁把 Cookie 写进业务代码、提交仓库或在回复正文回显明文。清除旧值用 `lanhu_dds_doctor({ forget: true })`。
 
 ## 2. 查项目规范与 UI/图标库（先跑 doctor）
 
-> 环境里有 `lanhu_dds_doctor` / `lanhu_dds_screens` / `lanhu_dds_build` 工具（已装 `dsh-lanhu-dds` 插件）时直接调工具（`lanhu_dds_doctor` 自动定位当前会话工作目录，无需手传 `project`）；纯 Skill 环境跑 `node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs <子命令>`。
+> 本技能随 `dsh-lanhu-dds` 插件提供，全程调 `lanhu_dds_doctor` / `lanhu_dds_screens` / `lanhu_dds_build` 三个工具（`lanhu_dds_doctor` 自动定位当前会话工作目录，无需手传 `project`）。
 
-1. 调 `lanhu_dds_doctor({})`（CLI：`doctor`），一次性拿到：
-   - **输出单位 `--unit`**：自动读取 `config` 的 `designWidth`（750 → `design`；375 → `css`）或 `postcss` 的 `rootValue`/`viewportWidth`。
+1. 调 `lanhu_dds_doctor({})`，一次性拿到：
+   - **输出单位 `unit`**：自动读取 `config` 的 `designWidth`（750 → `design`；375 → `css`）或 `postcss` 的 `rootValue`/`viewportWidth`。
    - **项目主规范来源**：
      - 若项目根已有完备的 **`AGENTS.md` / `CLAUDE.md`**，`doctor` 直接认它为最高准则（`rules.delegatedTo: "AGENTS.md"`），**不要**再跑 `init` 生成空白 `project-rules.md`。
      - 若项目既无 `AGENTS.md` 也无 `.agents/skills/lanhu-dds-codegen/project-rules.md`，才跑 `lanhu_dds_doctor({ init: true, ui: true })` 生成模板并结合仓库现状补齐。
@@ -73,7 +73,7 @@ Cookie 唯一存放路径：**`~/.dsh-lanhu-dds/cookie`**（可用 `DSH_LANHU_DD
 
 ### 3.1 选屏与旧页独有功能快扫
 
-1. 调 `lanhu_dds_screens({ url })`（CLI：`build --url "<链接>" --list`），查看每屏 `index / width×height / nodes / raster / title / texts`（`raster: true` 代表整张位图无图层结构，需明确告知用户无法由 DDS 结构化还原）。
+1. 调 `lanhu_dds_screens({ url })`，查看每屏 `index / width×height / nodes / raster / title / texts`（`raster: true` 代表整张位图无图层结构，需明确告知用户无法由 DDS 结构化还原）。
 2. 用 `glob` 定位目标业务目录下的页面文件，并**快速扫一眼目标页面旧文件的 `<script>` 与功能块概览**（此时不细读旧 CSS，只做一件事：识别原页面是否存在**蓝湖设计稿未画出的业务开关、额外表单项或合规警示条**，以便在下一步一次性找用户拍板，杜绝写到最后才补问返工）。
 
 ### 3.2 开工契约确认（全场唯一 1 次提问，先拍板后编译，选项必须正交无歧义）
@@ -190,11 +190,3 @@ Cookie 唯一存放路径：**`~/.dsh-lanhu-dds/cookie`**（可用 `DSH_LANHU_DD
 - **改了什么**：本次确认的任务模式（重构 / 优化）、逐页对应屏号（`screen-N`）、复用的内网组件、保留的业务契约与用户拍板的差异项。
 - **怎么验证**：实际跑过的静态检查/构建命令与结果。
 - **未验证项或残留风险**：图标占位待办、未纳入屏或未改动的全局公共组件说明（无则写「无」）。
-
-## 7. 两种运行方式与零依赖说明
-
-| 维度 | 纯 Skill（CLI） | Skill + `dsh-lanhu-dds` 插件 |
-|---|---|---|
-| 调用方式 | `node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs ...` | 直接调 `lanhu_dds_doctor` / `lanhu_dds_screens` / `lanhu_dds_build` |
-| Cookie 与产物 | `~/.dsh-lanhu-dds/cookie`；`~/.dsh-lanhu-dds/sessions/<会话>/` | 完全相同 |
-| 运行环境 | 纯 Node ≥ 18（内置 PNG 裁剪、像素尺寸解析与 `alipic` 镜像回退，无需 Python / Playwright / lanhu-mcp） | 完全相同 |

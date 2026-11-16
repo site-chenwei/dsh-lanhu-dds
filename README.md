@@ -94,8 +94,6 @@ lanhu_dds_doctor({ forget: true })
 }
 ```
 
-命令行形态同一件事：`--cookie "<值>"`，验证通过同样写进那个文件。
-
 ## 中间产物放哪
 
 按会话隔离，全部在 **`~/.dsh-lanhu-dds/`**（`DSH_LANHU_DDS_HOME` 可改根），不进项目：
@@ -104,12 +102,12 @@ lanhu_dds_doctor({ forget: true })
 ~/.dsh-lanhu-dds/
 ├── cookie                          # 蓝湖登录态（0600，验证通过才写），跨会话共用
 └── sessions/
-    └── <会话标识>/                  # 插件取当前 DSH 会话 id 前 12 位；命令行取时间戳
+    └── <会话标识>/                  # 取当前 DSH 会话 id 前 12 位
         ├── tmp/                    # 本次会话的临时脚本
         └── 我的订单-4a3b8460/       # 本次会话的产物（同会话补编部分屏时增量合并，传 clean:true 则清空重建）
 ```
 
-两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`（命令行 `--session`）。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
+两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
 
 `out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。产物不在项目里，**不需要 gitignore**。
 
@@ -118,7 +116,7 @@ lanhu_dds_doctor({ forget: true })
 | 文件 | 是什么 |
 |---|---|
 | `.agents/skills/lanhu-dds-codegen/project-rules.md` | 项目规范（技术栈 / 目录 / token / 字体 / 数据层） |
-| `.agents/skills/lanhu-dds-codegen/ui-library.md` | 内网 UI 组件清单（`doctor --ui` 生成，库升级重跑） |
+| `.agents/skills/lanhu-dds-codegen/ui-library.md` | 内网 UI 组件清单（`lanhu_dds_doctor({ ui: true })` 生成，库升级重跑） |
 
 其余的 `.agents/tmp/`、`dump-*.mjs`、`design/dds/`、`screen-*.json` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`。
 
@@ -157,7 +155,19 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 ```
 index.js              # 入口：注册 3 个工具 + 1 个 skill
 cordis.patch.yml      # 只插自己这一行
-lib/lanhu-dds.mjs     # DDS 抓取 + 编译核心（CLI 与插件共用）
-lib/png.mjs           # 纯 Node PNG 解码/裁剪/编码
+lib/
+  lanhu-api.mjs       # 蓝湖接口：链接解析、版本信息、DDS 树、二进制下载
+  store.mjs           # Cookie 与按会话隔离的产物目录
+  dds-tree.mjs        # 树遍历、几何读取、选屏
+  compile.mjs         # 单屏编译：DDS 节点 → 屏内坐标 + CSS
+  spec.mjs            # 紧凑规格表（壳层折叠、安全区、样式树）
+  variants.mjs        # 屏间变体配对与差异表
+  assets.mjs          # 切图三级回退落地
+  render-html.mjs     # 参考 HTML 与 token
+  report.mjs          # 体检报告
+  build.mjs           # 高层入口：拉取 → 编译 → 落盘
+  project.mjs         # 项目接入自检
+  ui-library.mjs      # 内网 UI 库扫描与速查表
+  png.mjs             # 纯 Node PNG 解码/裁剪/编码
 skills/               # 随包的 skill 与参考文档
 ```

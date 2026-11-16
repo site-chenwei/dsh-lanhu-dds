@@ -1,6 +1,6 @@
 # 项目还原约定（lanhu-dds-codegen 项目级扩展）
 
-> **先看项目根目录有没有 `AGENTS.md` / `CLAUDE.md`**：若项目根已有完备的 `AGENTS.md`，`lanhu-dds doctor` 会直接认它为最高准则，**不需要**生成或维护本文件，只跑 `doctor --ui` 生成 `ui-library.md` 即可（避免两份规范打架）。
+> **先看项目根目录有没有 `AGENTS.md` / `CLAUDE.md`**：若项目根已有完备的 `AGENTS.md`，`lanhu_dds_doctor` 会直接认它为最高准则，**不需要**生成或维护本文件，只调 `lanhu_dds_doctor({ ui: true })` 生成 `ui-library.md` 即可（避免两份规范打架）。
 > 仅当项目没有 `AGENTS.md` 时，才由项目维护本文件，优先级**高于** `SKILL.md` 的通用规则。
 > 首次在本项目使用该 Skill 时：先按第 0 节做一次现场取证，把结论填进第 1~8 节，再动代码（本文件应当进版本库）。
 
@@ -8,15 +8,15 @@
 
 Skill 是通用的，本文件（或项目既有的 `AGENTS.md`）+ `ui-library.md` 是**项目特异**的那一半：技术栈、目录、token、字体、组件库、数据层。
 
-```bash
-# 1. 扫内网 UI 库与图标库，生成真实组件清单 → ui-library.md
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor --ui
+```js
+// 1. 扫内网 UI 库与图标库，生成真实组件清单 → ui-library.md
+lanhu_dds_doctor({ ui: true })
 
-# 2. （仅在项目没有 AGENTS.md 时）生成本模板并填入真实规范
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor --init
+// 2. （仅在项目没有 AGENTS.md 时）生成本模板并填入真实规范
+lanhu_dds_doctor({ init: true })
 
-# 3. 查接入状态与输出单位 --unit
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor
+// 3. 查接入状态与输出单位 unit
+lanhu_dds_doctor({})
 ```
 
 第 1 步会自动排除工具/SDK 包，递归扫描内网 UI 库与图标库的入口 `.d.ts` 及深层组件目录，产出 `ui-library.md`。库升级后重新执行即可。
@@ -50,10 +50,10 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 | 框架 | （如 Taro 4 + Vue 3（H5）/ React 18 + Vite） |
 | 语言 | （TS / JS，是否允许 any） |
 | 样式方案 | （CSS Module / Tailwind / SCSS / styled-components / 原子类） |
-| UI 组件库 | （包名 + 版本；组件清单见 `ui-library.md`，由 `doctor --ui` 生成；有没有基于原生标签的通用组件） |
+| UI 组件库 | （包名 + 版本；组件清单见 `ui-library.md`，由 `lanhu_dds_doctor({ ui: true })` 生成；有没有基于原生标签的通用组件） |
 | 单位方案 | **代码里写设计稿 px（750 基准），构建期转 rem/rpx**：`postcss-px-to-rem` 的 `rootValue` = ___（750 稿通常 75）；Taro 看 `config.ts` 的 `designWidth`（750 → 直接写 px） |
 | 适配方案 | （固定 375 / 弹性布局 / postcss-px-to-viewport / lib-flexible） |
-| 是否需要 `--unit css` | 若项目不用 px→rem 且按 375 逻辑宽开发，则填「是」（产物折半） |
+| 是否需要 `unit: "css"` | 若项目不用 px→rem 且按 375 逻辑宽开发，则填「是」（产物折半） |
 
 ## 2. 目录与命名
 
@@ -85,7 +85,7 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 这个 Skill 只在项目里写**两个文件**，都该提交：
 
 - `.agents/skills/lanhu-dds-codegen/project-rules.md` —— 本文
-- `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单（`doctor --ui` 生成，库升级后重跑）
+- `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单（`lanhu_dds_doctor({ ui: true })` 生成，库升级后重跑）
 
 **产物不进项目**：`~/.dsh-lanhu-dds/sessions/<会话>/` 下按会话隔离放裁图 / IR / 几何表 / 参考 HTML / 切图；Cookie 在 `~/.dsh-lanhu-dds/cookie`（`DSH_LANHU_DDS_HOME` 可改根）。所以不需要 gitignore 任何东西。
 

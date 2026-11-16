@@ -10,17 +10,9 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import {
-  buildDesign,
-  diagnoseProject,
-  initProjectRules,
-  scanAndWriteUiDocs,
-  COOKIE_FILE,
-  readCookie,
-  saveCookie,
-  forgetCookie,
-  pruneSessions,
-} from './lib/lanhu-dds.mjs'
+import { buildDesign } from './lib/build.mjs'
+import { diagnoseProject, initProjectRules, scanAndWriteUiDocs } from './lib/project.mjs'
+import { COOKIE_FILE, readCookie, saveCookie, forgetCookie, pruneSessions } from './lib/store.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SKILL_DIR = join(HERE, 'skills', 'lanhu-dds-codegen')
