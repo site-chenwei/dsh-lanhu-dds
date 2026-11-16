@@ -1,25 +1,25 @@
 # 项目还原约定（lanhu-dds-codegen 项目级扩展）
 
-> 本文件由**项目自己**维护，优先级**高于** `SKILL.md` 的通用规则。
-> 首次在本项目使用该 Skill 时：先按第 0 节做一次现场取证，把结论填进第 1~8 节，再动代码。
-> 之后每次还原都先读本文件；发现新约定就补进来（本文件应当进版本库）。
+> **先看项目根目录有没有 `AGENTS.md` / `CLAUDE.md`**：若项目根已有完备的 `AGENTS.md`，`lanhu-dds doctor` 会直接认它为最高准则，**不需要**生成或维护本文件，只跑 `doctor --ui` 生成 `ui-library.md` 即可（避免两份规范打架）。
+> 仅当项目没有 `AGENTS.md` 时，才由项目维护本文件，优先级**高于** `SKILL.md` 的通用规则。
+> 首次在本项目使用该 Skill 时：先按第 0 节做一次现场取证，把结论填进第 1~8 节，再动代码（本文件应当进版本库）。
 
 ## 这就是「接入点」
 
-Skill 是通用的，本文件是**项目特异**的那一半：技术栈、目录、token、字体、组件库、数据层。装到内网后，把下面这些换成真实内容，模型才算真的懂这个项目。
+Skill 是通用的，本文件（或项目既有的 `AGENTS.md`）+ `ui-library.md` 是**项目特异**的那一半：技术栈、目录、token、字体、组件库、数据层。
 
 ```bash
-# 1. 生成模板（已存在则不覆盖）
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor --init
-
-# 2. 扫内网 UI 库，生成真实组件清单 → ui-library.md
+# 1. 扫内网 UI 库与图标库，生成真实组件清单 → ui-library.md
 node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor --ui
 
-# 3. 查还有哪些没填 / 该用哪个 --unit
+# 2. （仅在项目没有 AGENTS.md 时）生成本模板并填入真实规范
+node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor --init
+
+# 3. 查接入状态与输出单位 --unit
 node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor
 ```
 
-第 2 步扫的是 `node_modules/<内网包>/es/`（或 `lib/`、`dist/`）下的组件目录，产出 `ui-library.md`：组件名、导入路径、从 `.d.ts` 里尽力解析的 props。**这个文件是确定的、可重跑的**——库升级后重新执行即可，不靠人抄文档。
+第 1 步会自动排除工具/SDK 包，递归扫描内网 UI 库与图标库的入口 `.d.ts` 及深层组件目录，产出 `ui-library.md`。库升级后重新执行即可。
 
 `doctor` 会输出「空着 N 项、占位 M 处」和逐条待办。**空着的项不是可选项**——那正是模型会自己编的地方。全部填完后 `ready: true`，再开始还原。
 
@@ -93,11 +93,11 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 
 | 类别 | 例子 |
 |---|---|
-| 产物拷贝 | `design/dds/`、`.lanhu-dds/`、`screen-*.ir.json` |
+| 产物拷贝 | `design/dds/`、`.lanhu-dds/`、`screen-*.ir.json`、`screen-*.spec.md` |
 | 临时脚本 | `.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、`scratch/`、`tmp/` |
 | 手搓的中间态 | 根目录 `dump-*.json`、`test2.js` |
 
-要读 IR 就 `jq` / `node -e` / `cat`；确实需要一个临时脚本，写到当前会话的 `~/.dsh-lanhu-dds/sessions/<会话>/tmp/`。会话目录堆积用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清。
+出码直接 `read` 会话产物目录下的 `screen-N.spec.md`，无需手写解析脚本；确需落临时文件时只写到当前会话的 `~/.dsh-lanhu-dds/sessions/<会话>/tmp/`。超期会话目录用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清理。
 
 ## 4. 字体
 
@@ -128,16 +128,12 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 
 ```vue
 <script setup lang="ts">
-// TODO(接入) 下面的 @company/ui / UiButton / UiTag 都是占位，换成内网库真实组件后删掉本行
-import Taro from '@tarojs/taro'
+// TODO(接入) 下面的 @company/ui / UiButton / UiTag 与路由写法均为占位，务必换成项目真实组件与路由封装后删掉本行
 import { UiButton, UiTag } from '@company/ui'
 
 interface OrderItem { id: string; title: string; spec: string; price: string; thumb: string; status: string }
 defineProps<{ order: OrderItem }>()
-
-function goDetail(id: string) {
-  Taro.navigateTo({ url: `/pages/order-detail/index?id=${id}` })
-}
+const emit = defineEmits<{ select: [id: string] }>()
 </script>
 
 <template>
@@ -154,7 +150,7 @@ function goDetail(id: string) {
       </div>
       <span class="order-card__price">{{ order.price }}</span>
     </div>
-    <UiButton size="small" block @click="goDetail(order.id)">查看详情</UiButton>
+    <UiButton size="small" block @click="emit('select', order.id)">查看详情</UiButton>
   </div>
 </template>
 

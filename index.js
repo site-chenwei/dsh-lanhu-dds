@@ -2,20 +2,19 @@
  * dsh-lanhu-dds — 把蓝湖「转代码」(DDS) 接进 DSH。
  *
  * 零依赖：不需要 lanhu-mcp、不需要 Python、不需要 Playwright。
- * 蓝湖 DDS 接口只要一个 Cookie，切图是公开 CDN，PNG 裁切由本包的 lib/ 自己实现。
+ * 蓝湖 DDS 接口只要一个 Cookie，切图支持公开 CDN + alipic 内网镜像 + 原图无遮挡裁切三级回退。
  *
  * 提供三个工具（lanhu_dds_screens / lanhu_dds_build / lanhu_dds_doctor），并注册 lanhu-dds-codegen skill。
  */
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   buildDesign,
   diagnoseProject,
   initProjectRules,
-  inspectUiLibrary,
-  writeUiLibraryDoc,
+  scanAndWriteUiDocs,
   COOKIE_FILE,
   readCookie,
   saveCookie,
@@ -177,46 +176,65 @@ export function createScreensTool() {
 const DOCTOR_PARAMS = {
   type: 'object',
   properties: {
-    project: { type: 'string', description: '项目根目录，默认当前工作目录。' },
-    init: { type: 'boolean', description: '生成 project-rules.md 接入模板（已存在不覆盖）。' },
-    ui: { type: 'boolean', description: '扫内网 UI 库，把真实组件清单写到 .agents/skills/lanhu-dds-codegen/ui-library.md。' },
-    pkg: { type: 'string', description: '内网 UI 库包名；不填则用 doctor 自动识别的第一个。' },
+    project: { type: 'string', description: '项目根目录；省略时自动取当前会话工作目录（无需手传）。' },
+    init: { type: 'boolean', description: '生成 project-rules.md 接入模板（已存在不覆盖；若项目已有完备 AGENTS.md 则无需开启）。可与 ui:true 同时传入。' },
+    ui: { type: 'boolean', description: '扫内网 UI 库与图标库，把真实组件清单写到 .agents/skills/lanhu-dds-codegen/ui-library.md。可与 init:true 同时传入。' },
+    pkg: { type: 'string', description: '显式指定要扫描的 UI 库包名；不填则自动扫描全部识别到的内网 UI 包与图标包（自动排除工具/SDK 包）。' },
     forget: { type: 'boolean', description: '删除已保存的蓝湖 Cookie（换号或排查 Cookie 问题时用）。' },
     prune: { type: 'boolean', description: '清掉超过 days 天没动的会话目录（产物 + 临时脚本），不动 Cookie。' },
     days: { type: 'number', description: 'prune 的天数阈值，默认 7。' },
   },
 }
 
-export function createDoctorTool() {
+async function resolveProjectDir(ctx, explicit, exec) {
+  if (explicit && String(explicit).trim()) return resolve(String(explicit).trim())
+  try {
+    const wd = ctx?.get?.('workingDirectory')
+    if (wd?.ensure && exec?.agent) {
+      const agentCwd = await wd.ensure(exec.agent, exec.signal)
+      if (agentCwd) return resolve(agentCwd)
+    }
+  } catch { /* 回退到环境变量或进程工作目录 */ }
+  return resolve(process.env.DSH_CWD || process.cwd())
+}
+
+export function createDoctorTool(ctx) {
   return {
     name: 'lanhu_dds_doctor',
     description:
-      '检查项目是否已接入蓝湖 DDS 还原规范：读出该用的输出单位（design/css，依据 designWidth 或 postcss rootValue）、' +
-      '识别内网 UI 包、列出 project-rules.md 还空着哪几项。**照设计稿写代码前先跑它**，' +
-      '输出 ready:false 时说明项目规范还没填，此时照模板示例写就是编。',
+      '检查项目是否已接入蓝湖 DDS 还原规范：自动定位当前会话工作目录、读出输出单位（design/css）、识别既有 AGENTS.md、' +
+      '区分内网 UI 组件包/图标包与工具包，并支持一键生成 ui-library.md（ui:true）与 project-rules.md（init:true，二者可同传）。',
     parameters: DOCTOR_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
-    async execute(args) {
-      const dir = args.project ?? process.cwd()
+    async execute(args, exec) {
       if (args.forget) return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
       if (args.prune) return { ok: true, ...pruneSessions({ days: args.days ?? 7 }), hint: '已清掉超期会话目录；Cookie 不受影响' }
+
+      const dir = await resolveProjectDir(ctx, args.project, exec)
+      const actions = {}
       if (args.init) {
-        const r = initProjectRules(dir)
-        return r.ok ? { ok: true, ...r, hint: '把真实技术栈/目录/token/组件库填进去，填完再跑一次本工具直到 ready:true' } : { ok: false, ...r }
+        actions.init = initProjectRules(dir)
       }
       if (args.ui) {
-        const diag = diagnoseProject(dir)
-        if (!diag.ok) return { ok: false, error: diag.error }
-        const pkg = args.pkg ?? diag.internalPackages[0]
-        if (!pkg) return { ok: false, error: '没有识别到内网 UI 包', hint: '用 pkg 参数指定包名；或先确认 package.json 里内网库的写法' }
-        const info = inspectUiLibrary(dir, pkg)
-        if (!info.ok) return { ok: false, ...info, hint: '确认依赖已安装（node_modules 里有这个包）' }
-        const w = writeUiLibraryDoc(dir, info)
-        return { ok: true, ...w, components: info.components.map((c) => c.name), hint: '出码前先读这份清单找现成组件；缺的组件手写后加到文件末尾' }
+        actions.ui = scanAndWriteUiDocs(dir, args.pkg)
       }
-      const r = diagnoseProject(dir)
-      if (!r.ok) return { ok: false, error: r.error, hint: '传入项目根目录（有 package.json 的那层）' }
-      return r
+      const diag = diagnoseProject(dir)
+      if (!diag.ok) {
+        return { ok: false, error: diag.error, hint: '确认当前工作目录或 project 参数指向含 package.json 的项目根目录' }
+      }
+      if (args.init || args.ui) {
+        const anyFailed = (actions.init && !actions.init.ok) || (actions.ui && !actions.ui.ok)
+        return {
+          ok: !anyFailed,
+          ...actions,
+          diagnosis: diag,
+          ...(actions.ui && !actions.ui.ok ? { error: actions.ui.error } : {}),
+          hint: diag.ready
+            ? '项目规范与 UI 组件清单均已就绪，可直接进入选屏/编译/逐页出码。'
+            : '请按 diagnosis.todos 处理剩余项；若项目已有完备 AGENTS.md，以其为最高准则。',
+        }
+      }
+      return diag
     },
   }
 }
@@ -225,8 +243,8 @@ export function createBuildTool() {
   return {
     name: 'lanhu_dds_build',
     description:
-      '把蓝湖设计图的指定屏编译成可直接消费的产物：设计稿裁图 PNG、结构 IR、像素几何表、绝对定位参考 HTML、' +
-      '组件切分大纲、设计 token、体检报告，并把切图下载到本地。纯 Node 实现，不需要浏览器或 Python。',
+      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（含层级、屏内坐标、父相位移、间距、完整样式与文案，单次 read 即可直接写代码）、' +
+      '设计稿裁图 screen-N.png、多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图。',
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args, exec) {
@@ -289,9 +307,8 @@ export function readSkill(dir = SKILL_DIR) {
 
 // ---------------------------------------------------------------- 入口
 
-export function apply(ctx, config) {
-
-  for (const make of [createScreensTool, createBuildTool, createDoctorTool]) {
+export function apply(ctx, _config) {
+  for (const make of [() => createScreensTool(), () => createBuildTool(), () => createDoctorTool(ctx)]) {
     try {
       const dispose = ctx.tools.register(make())
       ctx.effect(() => dispose)

@@ -70,13 +70,22 @@ export async function getJson(url, cookie, referer) {
   }
 }
 
-export async function getBinary(url, cookie) {
+export async function getBinary(url, cookie, timeoutMs = 120_000) {
   const res = await fetch(url, {
     headers: { 'User-Agent': UA, Referer: `${LANHU}/`, ...(cookie ? { Cookie: cookie } : {}) },
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   })
-  if (!res.ok) throw new Error(`参考图下载失败 HTTP ${res.status}: ${url}`)
-  return Buffer.from(await res.arrayBuffer())
+  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}: ${url}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (!buf.length) throw new Error(`下载返回空内容 (0B): ${url}`)
+  return buf
+}
+
+/** 内网常拦截 lanhu-oss-*.lanhuapp.com，改写到同源镜像 alipic.lanhuapp.com（需带 Cookie + Referer）可拿到逐字节一致的切图。 */
+export function toAlipicMirror(url) {
+  return /^https?:\/\/lanhu-oss-[^/]+\.lanhuapp\.com\//i.test(String(url ?? ''))
+    ? String(url).replace(/^https?:\/\/lanhu-oss-[^/]+\.lanhuapp\.com\//i, 'https://alipic.lanhuapp.com/')
+    : null
 }
 
 /** 从蓝湖链接里抠出 project_id / image_id / team_id。支持 hash 路由与 query 两种写法。 */
@@ -374,6 +383,7 @@ export function compileScreen(ddsRoot, screenNode, { scale, mode = 'abs', screen
     nodes.push({ node: n, depth, idx: i++ })
   })
 
+  const origin = nodeRect(nodes[0].node, scale)
   const boxes = new Map()
   for (const { node, depth, idx } of nodes) {
     const rect = nodeRect(node, scale)
@@ -388,15 +398,35 @@ export function compileScreen(ddsRoot, screenNode, { scale, mode = 'abs', screen
       uiType: String(node.uiType ?? ''),
       eleName: String(node.eleName ?? ''),
       synthetic: isSynthetic(node),
+      raw: rawRect(node),
       rect,
+      screenRect: {
+        x: round(rect.x - origin.x),
+        y: round(rect.y - origin.y),
+        w: rect.w,
+        h: rect.h,
+      },
       // abs 模式：坐标转为相对父级，父级自身被裁切时才会继承 overflow 语义
       rel: {
         x: round(rect.x - parentRect.x),
         y: round(rect.y - parentRect.y),
       },
+      parentNode: depth > 0 ? parent : null,
       kids: [],
     })
     if (parent && boxes.get(parent)) boxes.get(parent).kids.push(node)
+  }
+
+  for (const b of boxes.values()) {
+    for (let k = 1; k < b.kids.length; k++) {
+      const prev = boxes.get(b.kids[k - 1])
+      const cur = boxes.get(b.kids[k])
+      if (cur.screenRect.y >= prev.screenRect.y + prev.screenRect.h - 1) {
+        cur.gap = { axis: 'y', px: round(cur.screenRect.y - (prev.screenRect.y + prev.screenRect.h)) }
+      } else if (cur.screenRect.x >= prev.screenRect.x + prev.screenRect.w - 1) {
+        cur.gap = { axis: 'x', px: round(cur.screenRect.x - (prev.screenRect.x + prev.screenRect.w)) }
+      }
+    }
   }
 
   for (const { node, depth, idx } of nodes) {
@@ -478,6 +508,7 @@ export function compileScreen(ddsRoot, screenNode, { scale, mode = 'abs', screen
       if (color) css.color = String(color)
       else if (String(node.type) === 'lanhutext' && text.trim()) {
         css.color = 'var(--color-text-primary)'
+        b.colorMissing = true
         warnings.push({ kind: 'text-color-missing', node: b.id, text: text.slice(0, 20) })
       }
       if (!fs) warnings.push({ kind: 'text-fontsize-missing', node: b.id, text: text.slice(0, 20) })
@@ -513,11 +544,9 @@ export function compileScreen(ddsRoot, screenNode, { scale, mode = 'abs', screen
   }
 
   // 期望几何表：给页面加 data-dds，之后在真实 DOM 里逐元素核对
-  const origin = nodeRect(nodes[0].node, scale)
   const rects = nodes.map(({ node }) => {
     const b = boxes.get(node)
-    // 屏内相对坐标：和浏览器 getBoundingClientRect 直接可比，做几何回归时不用再减原点
-    return { idx: b.idx, dds: b.id, x: round(b.rect.x - origin.x), y: round(b.rect.y - origin.y), w: b.rect.w, h: b.rect.h }
+    return { idx: b.idx, dds: b.id, x: b.screenRect.x, y: b.screenRect.y, w: b.screenRect.w, h: b.screenRect.h }
   })
 
   const ir = buildIr(boxes, screenNode)
@@ -572,6 +601,7 @@ function buildIr(boxes, screenNode) {
   const map = new Map()
   for (const [node, b] of boxes) {
     map.set(node, {
+      idx: b.idx,
       dds: b.id,
       layerId: b.layerId,
       name: b.name,
@@ -579,7 +609,10 @@ function buildIr(boxes, screenNode) {
       uiType: b.uiType,
       eleName: b.eleName,
       synthetic: b.synthetic,
-      rect: b.rect,
+      // 统一输出屏内相对坐标（左上角 0,0），附带相对父节点偏移 rel 与前兄弟间距 gap，避免消费侧手算减法
+      rect: b.screenRect,
+      rel: b.rel,
+      ...(b.gap ? { gap: b.gap } : {}),
       text: b.text || undefined,
       css: b.css,
       children: [],
@@ -640,27 +673,30 @@ function renderNode(b, boxes) {
   return `${pad}<div ${attrs.join(' ')} style="${st}">\n${kids}\n${pad}</div>`
 }
 
-// ---------------------------------------------------------------- token / 报告
+// ---------------------------------------------------------------- token / 报告 / 紧凑规格表
 
-function collectTokens(compiled) {
+function collectTokens(compiledOrList) {
+  const list = Array.isArray(compiledOrList) ? compiledOrList : [compiledOrList]
   const colors = new Map()
   const fonts = new Map()
   const radii = new Map()
   const add = (m, k) => k && m.set(k, (m.get(k) ?? 0) + 1)
-  for (const b of compiled.boxes.values()) {
-    add(colors, b.css.color)
-    add(colors, b.css.backgroundColor)
-    if (b.fontFamily) {
-      const key = FAMILY_KEY(b.fontFamily)
-      if (!fonts.has(key)) fonts.set(key, { count: 0, family: b.fontFamily })
-      fonts.get(key).count++
+  for (const compiled of list) {
+    for (const b of compiled.boxes.values()) {
+      add(colors, b.css.color)
+      add(colors, b.css.backgroundColor)
+      if (b.fontFamily) {
+        const key = FAMILY_KEY(b.fontFamily)
+        if (!fonts.has(key)) fonts.set(key, { count: 0, family: b.fontFamily })
+        fonts.get(key).count++
+      }
+      add(radii, b.css.borderRadius)
     }
-    add(radii, b.css.borderRadius)
   }
   return { colors, fonts, radii }
 }
 
-function tokensCss({ colors, fonts, radii }, scale) {
+function tokensCss({ colors, fonts }) {
   const out = [':root{']
   const families = []
   for (const [, v] of fonts) families.push(`  --${FAMILY_KEY(v.family)}: ${familyStack(v.family)};`)
@@ -676,19 +712,44 @@ function tokensCss({ colors, fonts, radii }, scale) {
   return out.join('\n')
 }
 
-function buildReport({ meta, screens, compiled, warnings, gaps }) {
-  const w = warnings.reduce((m, x) => ((m[x.kind] = (m[x.kind] ?? 0) + 1), m), {})
+const REPORT_GAPS = [
+  'DDS 提供 boxShadow（本项目 4837 个节点里出现 5 次），里面的 px 已按输出单位折算。',
+  'DDS 不提供 textShadow / filter / 模糊类效果：这些只能从 screen-N.png 参考图目测。',
+  'DDS 的图标只有切图 PNG，没有矢量也没有语义名：优先换项目既有图标库，没有的按 Skill 6.4 做占位并列入待办。',
+  'DDS 的渐变是完整可用的 linear-gradient（角度与色标齐全），不要重新取色。',
+  'DDS 不提供响应式约束（百分比/媒体查询/安全区），375 逻辑宽之外的适配需要按项目栅格重算。',
+  'DDS 不提供交互状态（hover/按压/空态/加载态/错误态）与原型流转，需结合需求或既有页面补齐。',
+]
+
+function buildReport({ meta, screens, compiledList, groupsByScreen, assetStats, variantPairs, gaps = REPORT_GAPS }) {
+  const list = Array.isArray(compiledList) ? compiledList : [compiledList]
+  const allWarnings = list.flatMap((c) => c.warnings)
+  const w = allWarnings.reduce((m, x) => ((m[x.kind] = (m[x.kind] ?? 0) + 1), m), {})
+  const unitLabel = (meta.unit ?? 'design') === 'design' ? '设计稿 px（750 基准，交给项目内 px→rem 换算）' : 'CSS px（375 逻辑宽）'
+  const builtSummary = list.map((c) => `#${c.screenIndex}(${c.screenRect.w}×${c.screenRect.h}, ${c.boxes.size}节点)`).join('、')
+
   const L = []
-  L.push(`# DDS 体检报告 — ${meta.name || meta.imageId}`)
+  L.push(`# DDS 体检报告 — ${meta.name || meta.imageId || 'design'}`)
   L.push('')
   L.push(`- 画布：${meta.canvas.width}×${meta.canvas.height} 设计像素，缩放比 @${meta.scale}x（${meta.device || '按屏宽推算'}），逻辑宽 ${round(meta.canvas.width / meta.scale)}`)
-  L.push(`- 输出单位：${(meta.unit ?? 'design') === 'design' ? '设计稿 px（750 基准，交给项目内 px→rem 换算）' : 'CSS px（375 逻辑宽）'}`)
-  L.push(`- 参考图：${meta.referenceUrl ? `[原图](${meta.referenceUrl})` : '未取到'}`)
-  L.push(`- 设计图含 **${screens.length}** 屏；本次编译第 ${compiled.screenIndex} 屏（${compiled.screenRect.w}×${compiled.screenRect.h} CSS px，${compiled.boxes.size} 个节点）`)
+  L.push(`- 输出单位：${unitLabel}`)
+  L.push(`- 参考图：${meta.referenceUrl ? '已裁出各屏 `screen-N.png`' : '未取到'}`)
+  L.push(`- 设计图含 **${screens.length}** 屏；本次编译 **${list.length}** 屏：${builtSummary}`)
+  if (variantPairs?.length) {
+    L.push(`- 屏间变体：检测到 ${variantPairs.length} 组同页状态变体（详见 \`variants-diff.md\`）`)
+  }
+  if (assetStats) {
+    const parts = [`共 ${assetStats.total} 张 URL`]
+    if (assetStats.cdn) parts.push(`CDN 直下 ${assetStats.cdn}`)
+    if (assetStats.alipic) parts.push(`alipic 镜像 ${assetStats.alipic}`)
+    if (assetStats.cropped) parts.push(`reference.png 无遮挡裁切 ${assetStats.cropped}`)
+    if (assetStats.placeholders) parts.push(`需占位 ${assetStats.placeholders}（CDN 不可达且有文字叠加，勿用 curl 重试）`)
+    L.push(`- 切图资源：${parts.join('，')}`)
+  }
   L.push('')
   L.push('## 屏清单')
   L.push('')
-  L.push('| # | 尺寸(CSS) | 节点 | 整图? | 标题 |')
+  L.push('| # | 尺寸 | 节点 | 整图? | 标题 |')
   L.push('|---|---|---|---|---|')
   for (const s of screens) {
     L.push(`| ${s.index} | ${s.width}×${s.height} | ${s.nodes} | ${s.raster ? '⚠️ 是' : '否'} | ${(s.title || '').replace(/\|/g, '\\|').slice(0, 30)} |`)
@@ -699,6 +760,24 @@ function buildReport({ meta, screens, compiled, warnings, gaps }) {
   if (!Object.keys(w).length) L.push('无。')
   for (const [k, n] of Object.entries(w).sort((a, b) => b[1] - a[1])) L.push(`- \`${k}\`: ${n}`)
   L.push('')
+
+  const allGroups = []
+  for (const [scrIdx, gs] of groupsByScreen ?? []) {
+    for (const g of gs) allGroups.push({ screen: scrIdx, ...g })
+  }
+  L.push('## 重复结构 → 组件候选')
+  L.push('')
+  if (allGroups.length) {
+    L.push('| 屏 | 父节点 | 次数 | 单块尺寸 | 单块节点 | 文案样本 |')
+    L.push('|---|---|---|---|---|---|')
+    for (const g of allGroups) {
+      L.push(`| #${g.screen} | ${g.parentName}(${g.parent}) | ${g.count} | ${g.width} × ${g.height} | ${g.nodes} | ${g.texts.map((t) => `"${t}"`).join(' / ')} |`)
+    }
+  } else {
+    L.push('未发现同构重复（或均为单实例块）。')
+  }
+  L.push('')
+
   if (gaps.length) {
     L.push('## DDS 覆盖不到的地方（必须人工/视觉补齐）')
     L.push('')
@@ -708,7 +787,7 @@ function buildReport({ meta, screens, compiled, warnings, gaps }) {
   return L.join('\n')
 }
 
-// ---------------------------------------------------------------- 组件切分建议
+// ---------------------------------------------------------------- 组件切分与紧凑规格表
 
 /**
  * 重复结构检测：同一个父节点下、同宽、节点数量接近的兄弟块 = 组件抽取候选。
@@ -733,7 +812,6 @@ function findRepeatGroups(compiled) {
       byWidth.get(key).push({ child, nodes, h: child.rect.h })
     }
     for (const [width, list] of byWidth) {
-      // 节点数分簇：把 ±3 以内的算同一族，避免把不同构的块硬塞进一组
       const fams = []
       for (const item of [...list].sort((x, y) => x.nodes - y.nodes)) {
         const fam = fams.find((f) => Math.abs(item.nodes - f[0].nodes) <= 4)
@@ -797,116 +875,426 @@ function outlineMarkdown(compiled, groups) {
   return L.join('\n')
 }
 
-// ---------------------------------------------------------------- 产物落盘
+function formatPadding(css) {
+  const pt = css.paddingTop ?? '0'
+  const pr = css.paddingRight ?? '0'
+  const pb = css.paddingBottom ?? '0'
+  const pl = css.paddingLeft ?? '0'
+  if (pt === '0' && pr === '0' && pb === '0' && pl === '0') return ''
+  return `pad:${pt}/${pr}/${pb}/${pl}`
+}
+
+function formatRadii(css) {
+  if (css.borderRadius) return `r:${css.borderRadius}`
+  const tl = css.borderTopLeftRadius
+  const tr = css.borderTopRightRadius
+  const br = css.borderBottomRightRadius
+  const bl = css.borderBottomLeftRadius
+  if (!tl && !tr && !br && !bl) return ''
+  return `r:${tl ?? 0}/${tr ?? 0}/${br ?? 0}/${bl ?? 0}`
+}
 
 /**
- * 把 DDS 里的图片地址抓成本地文件，并把 CSS 改写成相对路径。
- * 蓝湖的切图 CDN 不校验 Cookie，但地址会过期，所以不能让它留在产物里。
+ * 单屏紧凑规格表（screen-N.spec.md）：把层级、屏内相对坐标、父容器偏移、前兄弟间距、
+ * 视觉样式、文案与本地切图路径合在一份几 KB 的文本里，模型单次 read 即可直接写代码，无需写脚本拆 ir.json。
  */
-export async function localizeAssets(compiled, outDir, cookie) {
+export function specMarkdown(compiled, groups, { title = '', unit = 'design' } = {}) {
+  const { boxes, screenRect, screenIndex } = compiled
+  const L = [
+    `# Screen ${screenIndex} — ${title || '未命名'} (${screenRect.w}×${screenRect.h}, unit=${unit}, ${boxes.size} 节点)`,
+    '',
+    '> 坐标系：本屏左上角 `(0,0)`；`@(x,y w×h)` 为屏内位置，`rel(dx,dy)` 为相对父容器偏移（`=parent` 表示与父同框，勿重复叠加 padding），`↑gap` / `←gap` 为与上一兄弟间距。',
+    '> 直接读本文件 + `screen-' + screenIndex + '.png` 出码，无需再写脚本解析 `ir.json`。',
+    '',
+  ]
+
+  if (groups.length) {
+    L.push('## 组件候选（同父同宽重复结构）', '')
+    L.push('| 父节点 | 次数 | 单块尺寸 | 单块节点 | 文案样本 |')
+    L.push('|---|---|---|---|---|')
+    for (const g of groups) {
+      L.push(`| ${g.parentName}(${g.parent}) | ${g.count} | ${g.width}×${g.height} | ${g.nodes} | ${g.texts.map((t) => `"${t}"`).join(' / ')} |`)
+    }
+    L.push('')
+  }
+
+  L.push('## 布局与样式树', '', '```text')
+  const walk = (b) => {
+    const sr = b.screenRect
+    const parent = b.parentNode ? boxes.get(b.parentNode) : null
+    const sameAsParent = parent && b.rel.x === 0 && b.rel.y === 0 && sr.w === parent.screenRect.w && sr.h === parent.screenRect.h
+    const tokens = []
+    const uiTag = b.uiType && !/^(lanhu|block|text|image|$)/i.test(b.uiType) ? `[${b.uiType}]` : ''
+    tokens.push(`${'  '.repeat(b.depth)}${b.name}${uiTag}`)
+    tokens.push(`@(${sr.x},${sr.y} ${sr.w}×${sr.h})`)
+    if (b.depth > 0) tokens.push(sameAsParent ? '=parent' : `rel(${b.rel.x},${b.rel.y})`)
+    if (b.gap) tokens.push(`${b.gap.axis === 'y' ? '↑gap:' : '←gap:'}${b.gap.px}`)
+
+    const c = b.css
+    if (b.kids.length > 0) {
+      tokens.push(c.flexDirection === 'column' ? 'col' : 'row')
+      if (c.justifyContent && c.justifyContent !== 'flex-start') tokens.push(`jc:${c.justifyContent}`)
+      if (c.alignItems && c.alignItems !== 'stretch') tokens.push(`ai:${c.alignItems}`)
+      if (c.flexWrap === 'wrap') tokens.push('wrap')
+      const pad = formatPadding(c)
+      if (pad) tokens.push(pad)
+    }
+
+    if (c.background && !/^url\(/i.test(c.background)) tokens.push(`bg:${c.background}`)
+    else if (c.backgroundColor) tokens.push(`bg:${c.backgroundColor}`)
+    const rad = formatRadii(c)
+    if (rad) tokens.push(rad)
+    for (const bk of ['border', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight']) {
+      if (c[bk]) tokens.push(`${bk}:${c[bk]}`)
+    }
+    if (c.boxShadow) tokens.push(`sh:${c.boxShadow}`)
+    if (c.opacity && c.opacity !== '1') tokens.push(`op:${c.opacity}`)
+
+    if (b.type === 'lanhutext') {
+      if (c.fontSize) tokens.push(`fs:${c.fontSize}`)
+      if (c.fontWeight && c.fontWeight !== '400') tokens.push(`fw:${c.fontWeight}`)
+      if (c.lineHeight) tokens.push(`lh:${c.lineHeight}`)
+      tokens.push(b.colorMissing ? 'c:MISSING(看裁图)' : (c.color ? `c:${c.color}` : ''))
+      if (c.WebkitBackgroundClip === 'text') tokens.push('grad-text')
+      if (c.textAlign && c.textAlign !== 'left') tokens.push(`ta:${c.textAlign}`)
+    }
+
+    if (b.asset?.status === 'ok') {
+      const iconHint = sr.w <= 64 && sr.h <= 64 && !b.kids.length ? '[图标候选]' : ''
+      const srcNote = b.asset.source === 'cropped-from-reference' ? '(原图裁切)' : ''
+      tokens.push(`img:${b.asset.file}${srcNote}${iconHint}`)
+    } else if (b.asset?.status === 'placeholder') {
+      tokens.push(`img:PLACEHOLDER(${sr.w}×${sr.h},文字叠加背景)`)
+    }
+
+    if (b.text) tokens.push(`"${b.text.replace(/\s+/g, ' ').slice(0, 60)}"`)
+    L.push(tokens.filter(Boolean).join(' '))
+    for (const k of b.kids) walk(boxes.get(k))
+  }
+  walk(boxes.get(compiled.root))
+  L.push('```', '')
+  return L.join('\n')
+}
+
+function nodeSig(b) {
+  const q = (v) => Math.round(v / 4) * 4
+  const sr = b.screenRect
+  const tag = b.text ? b.text.trim().slice(0, 24) : (b.css.backgroundColor || b.css.background?.slice(0, 24) || '')
+  return `${b.type}|${q(sr.x)},${q(sr.w)}x${q(sr.h)}|${tag}`
+}
+
+function collectSampleTexts(b, boxes, limit = 4) {
+  const out = []
+  const walk = (x) => {
+    if (out.length >= limit) return
+    if (x.text?.trim()) out.push(x.text.trim().replace(/\s+/g, ' ').slice(0, 20))
+    for (const k of x.kids) walk(boxes.get(k))
+  }
+  walk(b)
+  return out
+}
+
+function topDiffBlocks(compiled, otherSigs) {
+  const { boxes, root } = compiled
+  const diffs = []
+  const subtreeStats = (b) => {
+    let total = 0
+    let hit = 0
+    const walk = (x) => {
+      total++
+      if (otherSigs.has(nodeSig(x))) hit++
+      for (const k of x.kids) walk(boxes.get(k))
+    }
+    walk(b)
+    return { total, hit }
+  }
+  const visit = (b) => {
+    if (b.depth === 0) {
+      for (const k of b.kids) visit(boxes.get(k))
+      return
+    }
+    const { total, hit } = subtreeStats(b)
+    if (hit === total) return
+    if (hit / total < 0.35 || !b.kids.length) {
+      const sr = b.screenRect
+      const texts = collectSampleTexts(b, boxes)
+      diffs.push(`- \`${b.name}\` @(${sr.x},${sr.y} ${sr.w}×${sr.h}, ${total}节点)${texts.length ? `：${texts.map((t) => `"${t}"`).join(' / ')}` : ''}`)
+      return
+    }
+    for (const k of b.kids) visit(boxes.get(k))
+  }
+  visit(boxes.get(root))
+  return diffs.slice(0, 16)
+}
+
+/**
+ * 多屏编译时自动识别「同一页面的不同状态变体」（如详情页 vs 规格弹窗、确认页无地址 vs 有地址），
+ * 输出精简差异块，省去模型把两棵几十 KB 的树放进 CoT 肉眼比对。
+ */
+export function buildVariantsDiff(entries) {
+  if (!entries || entries.length < 2) return { pairs: [], markdown: '' }
+  const prepared = entries.map((e) => {
+    const sigs = new Set()
+    for (const b of e.compiled.boxes.values()) {
+      if (b.depth > 0) sigs.add(nodeSig(b))
+    }
+    return { ...e, sigs }
+  })
+
+  const pairs = []
+  for (let j = 1; j < prepared.length; j++) {
+    const B = prepared[j]
+    if (B.sigs.size < 6) continue
+    let best = null
+    for (let i = 0; i < j; i++) {
+      const A = prepared[i]
+      if (A.sigs.size < 6) continue
+      if (Math.abs(A.compiled.screenRect.w - B.compiled.screenRect.w) > 4) continue
+      let shared = 0
+      for (const s of A.sigs) if (B.sigs.has(s)) shared++
+      const ratio = shared / Math.min(A.sigs.size, B.sigs.size)
+      if (ratio >= 0.35 && (!best || ratio > best.ratio)) best = { A, B, ratio, shared }
+    }
+    if (best) pairs.push(best)
+  }
+
+  if (!pairs.length) return { pairs: [], markdown: '' }
+  const L = [
+    '# 屏间状态变体差异（variants-diff）',
+    '',
+    '> 下列屏对共享主体结构，通常是**同一个页面/路由的不同状态或弹层**（如空地址 vs 有地址、基础页 vs 底部弹窗），建议合在同一页面组件内按状态/弹层实现，不要拆成两份重复页面。',
+    '',
+  ]
+  for (const { A, B, ratio } of pairs) {
+    const pct = Math.round(ratio * 100)
+    L.push(`## Screen ${A.compiled.screenIndex}（${A.title || '未命名'}） ↔ Screen ${B.compiled.screenIndex}（${B.title || '未命名'}） — 结构重合 ${pct}%`, '')
+    const onlyA = topDiffBlocks(A.compiled, B.sigs)
+    const onlyB = topDiffBlocks(B.compiled, A.sigs)
+    L.push(`### 仅在 Screen ${A.compiled.screenIndex}（${A.compiled.screenRect.w}×${A.compiled.screenRect.h}）`)
+    L.push(...(onlyA.length ? onlyA : ['- （无独有子树，Screen B 为其超集/弹层叠加）']), '')
+    L.push(`### 仅在 Screen ${B.compiled.screenIndex}（${B.compiled.screenRect.w}×${B.compiled.screenRect.h}）`)
+    L.push(...(onlyB.length ? onlyB : ['- （无独有子树）']), '')
+  }
+  return { pairs, markdown: L.join('\n') }
+}
+
+// ---------------------------------------------------------------- 产物落盘
+
+function overlapsText(raw, textRects) {
+  for (const tr of textRects) {
+    const ox = Math.min(raw.x + raw.w, tr.x + tr.w) - Math.max(raw.x, tr.x)
+    const oy = Math.min(raw.y + raw.h, tr.y + tr.h) - Math.max(raw.y, tr.y)
+    if (ox > 2 && oy > 2) return true
+  }
+  return false
+}
+
+/**
+ * 切图本地化三级策略：
+ *   1. 直连原 URL（lanhu-oss-*.lanhuapp.com），某域名首次失败即同域熔断，不逐张卡超时；
+ *   2. 自动改写到同源镜像 alipic.lanhuapp.com（携带 Cookie + Referer，逐字节一致，解决内网拦截 lanhu-oss-*）；
+ *   3. 仍不可达时，若已拿到整张 reference.png 且该图片节点无上层文字遮挡，直接从原图裁切兜底；有文字遮挡则标为占位。
+ */
+export async function localizeAssets(compiled, outDir, cookie, { refImg = null, deadHosts = new Set(), manifestByUrl = null } = {}) {
+  const imgBoxes = []
   const urls = new Set()
   for (const b of compiled.boxes.values()) {
     const m = /^url\("?(.+?)"?\)$/.exec(String(b.css.backgroundImage ?? ''))
-    if (m && /^https?:/.test(m[1])) urls.add(m[1])
+    if (m && /^https?:/.test(m[1])) {
+      urls.add(m[1])
+      imgBoxes.push({ box: b, url: m[1] })
+    }
   }
-  if (!urls.size) return { total: 0, saved: 0, failed: [] }
+  if (!urls.size) return { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0, failed: [] }
+
   const dir = join(outDir, 'assets')
   mkdirSync(dir, { recursive: true })
-  const manifest = []
-  const failed = []
-  const list = [...urls]
-  for (let i = 0; i < list.length; i += 6) {
-    await Promise.all(list.slice(i, i + 6).map(async (url) => {
-      try {
-        const buf = await getBinary(url, cookie)
-        const ext = (/\\.(png|jpe?g|webp|gif|svg)(\\?|$)/i.exec(url)?.[1] ?? 'png').toLowerCase().replace('jpeg', 'jpg')
-        const name = createHash('sha1').update(url).digest('hex').slice(0, 10) + '.' + ext
-        writeFileSync(join(dir, name), buf)
-        manifest.push({ url, file: `assets/${name}`, bytes: buf.length })
-      } catch (e) {
-        failed.push({ url, error: String(e.message ?? e) })
+  const manifestPath = join(dir, 'manifest.json')
+  const store = manifestByUrl ?? new Map()
+  if (!store.size && existsSync(manifestPath)) {
+    try {
+      for (const item of JSON.parse(readFileSync(manifestPath, 'utf8'))) {
+        if (item?.url) store.set(item.url, item)
       }
+    } catch { /* 旧 manifest 损坏时重建 */ }
+  }
+
+  const failedByUrl = new Map()
+  const todoUrls = [...urls].filter((u) => !store.has(u))
+  for (let i = 0; i < todoUrls.length; i += 6) {
+    await Promise.all(todoUrls.slice(i, i + 6).map(async (url) => {
+      const ext = (/\.(png|jpe?g|webp|gif|svg)(\?|$)/i.exec(url)?.[1] ?? 'png').toLowerCase().replace('jpeg', 'jpg')
+      const name = createHash('sha1').update(url).digest('hex').slice(0, 10) + '.' + ext
+      let lastErr = ''
+      let host = ''
+      try { host = new URL(url).host } catch { host = '' }
+
+      if (host && !deadHosts.has(host)) {
+        try {
+          const buf = await getBinary(url, cookie, 8_000)
+          writeFileSync(join(dir, name), buf)
+          store.set(url, { url, file: `assets/${name}`, bytes: buf.length, source: 'cdn' })
+          return
+        } catch (e) {
+          lastErr = String(e.message ?? e)
+          deadHosts.add(host)
+        }
+      } else if (host) {
+        lastErr = `${host} 已熔断`
+      }
+
+      const mirror = toAlipicMirror(url)
+      if (mirror && !deadHosts.has('alipic.lanhuapp.com')) {
+        try {
+          const buf = await getBinary(mirror, cookie, 12_000)
+          writeFileSync(join(dir, name), buf)
+          store.set(url, { url, mirror, file: `assets/${name}`, bytes: buf.length, source: 'alipic' })
+          return
+        } catch (e) {
+          lastErr = String(e.message ?? e)
+          if (!/^HTTP \d{3}\b/i.test(lastErr)) deadHosts.add('alipic.lanhuapp.com')
+        }
+      }
+
+      failedByUrl.set(url, lastErr || '下载失败')
     }))
   }
-  for (const b of compiled.boxes.values()) {
-    const m = /^url\("?(.+?)"?\)$/.exec(String(b.css.backgroundImage ?? ''))
-    if (!m) continue
-    const hit = manifest.find((x) => x.url === m[1])
-    if (hit) b.css.backgroundImage = `url("./${hit.file}")`
+
+  const textRects = [...compiled.boxes.values()]
+    .filter((b) => b.type === 'lanhutext' && b.text?.trim())
+    .map((b) => b.raw)
+
+  let cdn = 0
+  let alipic = 0
+  let cropped = 0
+  let placeholders = 0
+  const failed = []
+
+  for (const { box: b, url } of imgBoxes) {
+    const hit = store.get(url)
+    if (hit) {
+      b.css.backgroundImage = `url("./${hit.file}")`
+      b.asset = { status: 'ok', file: hit.file, source: hit.source }
+      if (hit.source === 'alipic') alipic++
+      else cdn++
+      continue
+    }
+    const errMsg = failedByUrl.get(url) ?? '下载失败'
+    if (refImg && b.raw.w >= 2 && b.raw.h >= 2 && !overlapsText(b.raw, textRects)) {
+      try {
+        const cropBuf = encodePng(cropPng(refImg, b.raw))
+        const cropName = `crop-s${compiled.screenIndex}-${b.idx}-${createHash('sha1').update(url).digest('hex').slice(0, 6)}.png`
+        writeFileSync(join(dir, cropName), cropBuf)
+        const file = `assets/${cropName}`
+        store.set(`${url}#s${compiled.screenIndex}-${b.idx}`, { url, file, bytes: cropBuf.length, source: 'cropped-from-reference' })
+        b.css.backgroundImage = `url("./${file}")`
+        b.asset = { status: 'ok', file, source: 'cropped-from-reference' }
+        cropped++
+        continue
+      } catch { /* 裁剪异常退回占位 */ }
+    }
+    delete b.css.backgroundImage
+    b.asset = { status: 'placeholder', reason: 'overlaid-by-text', error: errMsg }
+    placeholders++
+    failed.push({ url, node: b.name, error: errMsg })
   }
-  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2))
-  return { total: urls.size, saved: manifest.length, failed }
+
+  writeFileSync(manifestPath, JSON.stringify([...store.values()], null, 2))
+  const saved = cdn + alipic + cropped
+  return { total: imgBoxes.length, saved, cdn, alipic, cropped, placeholders, failed }
 }
 
-/** 把整张画布裁出这一屏，产出人/模型都能直接看的参考图。解不了的格式就跳过。 */
-export function cropScreenPng(refPng, screenRaw) {
+/** 把整张画布裁出这一屏；支持传入 PNG Buffer 或已解码的图像对象以在多屏时复用解码结果。 */
+export function cropScreenPng(refPngOrImg, screenRaw) {
   try {
-    const img = decodePng(refPng)
-    const pad = 0
-    const rect = {
-      x: screenRaw.x - pad, y: screenRaw.y - pad,
-      w: screenRaw.w + pad * 2, h: screenRaw.h + pad * 2,
-    }
-    return encodePng(cropPng(img, rect))
+    const img = Buffer.isBuffer(refPngOrImg) ? decodePng(refPngOrImg) : refPngOrImg
+    if (!img?.data) return { error: '无效 PNG 数据' }
+    return encodePng(cropPng(img, { x: screenRaw.x, y: screenRaw.y, w: screenRaw.w, h: screenRaw.h }))
   } catch (e) {
     return { error: String(e.message ?? e) }
   }
 }
 
-export function writeArtifacts(outDir, { meta, tree, screens, screenDescs, compiled, groups, crop }) {
+export function writeArtifacts(outDir, { meta, tree, screens, screenDescs, compiled, groups, crop, skipSummary = false }) {
   mkdirSync(outDir, { recursive: true })
   const p = (f) => join(outDir, f)
   const screenNo = compiled.screenIndex
+  const title = screenDescs?.[screenNo]?.title ?? ''
 
-  writeFileSync(p('meta.json'), JSON.stringify({
-    ...meta,
-    reference: meta.referenceUrl ? 'screen-<n>.png 已裁出；整张原图见 reference.png' : undefined,
-    screens: screenDescs,
-    compiledAt: new Date().toISOString(),
-  }, null, 2))
+  if (!skipSummary) {
+    writeFileSync(p('meta.json'), JSON.stringify({
+      ...meta,
+      reference: meta.referenceUrl ? 'screen-<n>.png 已裁出；整张原图见 reference.png' : undefined,
+      screens: screenDescs,
+      compiledAt: new Date().toISOString(),
+    }, null, 2))
+    if (tree) writeFileSync(p('dds.raw.json'), JSON.stringify(tree))
+    if (screenDescs) writeFileSync(p('screens.json'), JSON.stringify(screenDescs, null, 2))
+  }
 
-  if (tree) writeFileSync(p('dds.raw.json'), JSON.stringify(tree))
-  if (screenDescs) writeFileSync(p('screens.json'), JSON.stringify(screenDescs, null, 2))
+  const singleTokensText = tokensCss(collectTokens(compiled))
+  if (!skipSummary) writeFileSync(p('tokens.css'), singleTokensText + '\n')
 
-  const tokens = collectTokens(compiled)
-  const tokensText = tokensCss(tokens, compiled.scale)
-  writeFileSync(p('tokens.css'), tokensText + '\n')
-
-  const html = renderHtml(compiled, { tokens: tokensText, title: `screen ${screenNo}` })
+  compiled.ir = buildIr(compiled.boxes, compiled.root)
+  const html = renderHtml(compiled, { tokens: singleTokensText, title: `screen ${screenNo}` })
+  const spec = specMarkdown(compiled, groups, { title, unit: meta.unit ?? 'design' })
+  writeFileSync(p(`screen-${screenNo}.spec.md`), spec)
   writeFileSync(p(`screen-${screenNo}.html`), html)
   writeFileSync(p(`screen-${screenNo}.ir.json`), JSON.stringify(compiled.ir, null, 2))
   writeFileSync(p(`screen-${screenNo}.rects.json`), JSON.stringify(compiled.rects, null, 2))
   writeFileSync(p(`screen-${screenNo}.outline.md`), outlineMarkdown(compiled, groups))
   if (crop && Buffer.isBuffer(crop)) writeFileSync(p(`screen-${screenNo}.png`), crop)
 
-  const gaps = [
-    'DDS 提供 boxShadow（本项目 4837 个节点里出现 5 次），但里面的 px 是设备像素，本目录产物已按缩放比折算；手写时同样要除。',
-    'DDS 不提供 textShadow / filter / 模糊类效果：这些只能从参考图估。',
-    'DDS 的图标只有切图 PNG，没有矢量也没有语义名：按 Skill 6.4 做占位、写全 CSS，并把「位置 + 建议图标」列进交付待办。',
-    'DDS 的渐变是完整可用的 linear-gradient（角度与色标齐全），不要重新取色。',
-    'DDS 不提供响应式约束（百分比/媒体查询/安全区），375 逻辑宽之外的适配需要按项目栅格重算。',
-    'DDS 不提供交互状态（hover/按压/空态/加载态/错误态）与原型流转，必须回到蓝湖原型确认。',
-    'DDS 里的圆角/边框/描边可能有 1px 级别的丢失，验收以参考图为准。',
-  ]
-  const report = buildReport({ meta, screens: screenDescs ?? [], compiled, warnings: compiled.warnings, gaps })
-  writeFileSync(p('report.md'), report + '\n\n'
-    + '## 重复结构 → 组件候选\n\n'
-    + (groups.length
-      ? ['| 父节点 | 次数 | 单块尺寸 | 单块节点 | 文案样本 |', '|---|---|---|---|---|',
-        ...groups.map((g) => `| ${g.parentName}(${g.parent}) | ${g.count} | ${g.width} × ${g.height} | ${g.nodes} | ${g.texts.map((t) => `"${t}"`).join(' / ')} |`)].join('\n')
-      : '未发现同构重复（或本屏是单实例页面）。')
-    + '\n')
+  if (!skipSummary) {
+    const report = buildReport({
+      meta,
+      screens: screenDescs ?? [],
+      compiledList: [compiled],
+      groupsByScreen: [[screenNo, groups]],
+    })
+    writeFileSync(p('report.md'), report)
+  }
 
   return {
     outDir: resolve(outDir),
     screen: screenNo,
+    specFile: `screen-${screenNo}.spec.md`,
     files: [
-      `screen-${screenNo}.html`, `screen-${screenNo}.ir.json`, `screen-${screenNo}.rects.json`,
-      `screen-${screenNo}.outline.md`, 'tokens.css', 'report.md', 'screens.json', 'meta.json',
+      `screen-${screenNo}.spec.md`, `screen-${screenNo}.png`, `screen-${screenNo}.html`,
+      `screen-${screenNo}.ir.json`, `screen-${screenNo}.rects.json`, `screen-${screenNo}.outline.md`,
+      'tokens.css', 'report.md', 'screens.json', 'meta.json',
     ],
     warnings: compiled.warnings.length,
     nodes: compiled.boxes.size,
     repeatGroups: groups.length,
+  }
+}
+
+function writeSummaryArtifacts(outDir, { meta, screenDescs, builtEntries, assetStats }) {
+  const p = (f) => join(outDir, f)
+  const compiledList = builtEntries.map((e) => e.compiled)
+  const tokensText = tokensCss(collectTokens(compiledList))
+  writeFileSync(p('tokens.css'), tokensText + '\n')
+
+  const { pairs, markdown } = buildVariantsDiff(builtEntries)
+  if (markdown) writeFileSync(p('variants-diff.md'), markdown)
+
+  const report = buildReport({
+    meta,
+    screens: screenDescs ?? [],
+    compiledList,
+    groupsByScreen: builtEntries.map((e) => [e.compiled.screenIndex, e.groups]),
+    assetStats,
+    variantPairs: pairs,
+  })
+  writeFileSync(p('report.md'), report)
+  return {
+    variantsDiff: markdown ? 'variants-diff.md' : null,
+    variantPairs: pairs.map(({ A, B, ratio }) => ({
+      a: A.compiled.screenIndex,
+      b: B.compiled.screenIndex,
+      overlap: Math.round(ratio * 100) / 100,
+    })),
   }
 }
 
@@ -1067,13 +1455,20 @@ export async function buildDesign({
   mkdirSync(outDir, { recursive: true })
   writeFileSync(join(outDir, 'dds.raw.json'), JSON.stringify(tree))
   writeFileSync(join(outDir, 'screens.json'), JSON.stringify(descs, null, 2))
-  writeFileSync(join(outDir, 'meta.json'), JSON.stringify({ ...meta, screens: descs }, null, 2))
+  writeFileSync(join(outDir, 'meta.json'), JSON.stringify({
+    ...meta,
+    reference: meta.referenceUrl ? 'screen-<n>.png 已裁出；整张原图见 reference.png' : undefined,
+    screens: descs,
+    compiledAt: new Date().toISOString(),
+  }, null, 2))
 
   let refPng = null
+  let refImg = null
   if (reference && meta.referenceUrl) {
     try {
       refPng = await getBinary(meta.referenceUrl, cookie)
       writeFileSync(join(outDir, 'reference.png'), refPng)
+      try { refImg = decodePng(refPng) } catch { refImg = null }
     } catch (e) {
       refPng = null
       meta.referenceError = String(e.message ?? e)
@@ -1084,29 +1479,72 @@ export async function buildDesign({
     ? allScreens.map((s) => s.index)
     : String(picked).split(',').map((x) => Number(x.trim()))
   const built = []
+  const builtEntries = []
+  const deadHosts = new Set()
+  const manifestByUrl = new Map()
+  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0 }
+
   for (const idx of want) {
     const s = allScreens[idx]
     if (!s) { built.push({ screen: idx, error: '该屏不存在' }); continue }
     const compiled = compileScreen(tree, s.node, { scale: div, screenIndex: idx })
-    const assetResult = assets ? await localizeAssets(compiled, outDir, cookie) : null
-    const crop = refPng ? cropScreenPng(refPng, s.raw) : null
+    const assetResult = assets
+      ? await localizeAssets(compiled, outDir, cookie, { refImg, deadHosts, manifestByUrl })
+      : null
+    if (assetResult) {
+      assetSummary.total += assetResult.total
+      assetSummary.saved += assetResult.saved
+      assetSummary.cdn += assetResult.cdn
+      assetSummary.alipic += assetResult.alipic
+      assetSummary.cropped += assetResult.cropped
+      assetSummary.placeholders += assetResult.placeholders
+    }
+    const crop = (refImg || refPng) ? cropScreenPng(refImg || refPng, s.raw) : null
     const groups = findRepeatGroups(compiled)
     const result = writeArtifacts(outDir, {
       meta, tree: null, screens: allScreens, screenDescs: descs, compiled, groups,
       crop: Buffer.isBuffer(crop) ? crop : null,
+      skipSummary: true,
     })
+    builtEntries.push({ compiled, groups, title: descs[idx].title })
     built.push({
       ...result,
       title: descs[idx].title,
       size: { width: descs[idx].width, height: descs[idx].height },
       raster: descs[idx].raster,
-      assets: assetResult ? { total: assetResult.total, saved: assetResult.saved, failed: assetResult.failed.length } : null,
+      assets: assetResult ? {
+        total: assetResult.total,
+        saved: assetResult.saved,
+        cdn: assetResult.cdn,
+        alipic: assetResult.alipic,
+        cropped: assetResult.cropped,
+        placeholders: assetResult.placeholders,
+      } : null,
       crop: Buffer.isBuffer(crop) ? `screen-${idx}.png` : (crop?.error ?? null),
       repeatGroups: groups.map((g) => ({ parent: g.parentName, count: g.count, texts: g.texts })),
     })
   }
+
+  const summary = builtEntries.length
+    ? writeSummaryArtifacts(outDir, { meta, screenDescs: descs, builtEntries, assetStats: assets ? assetSummary : null })
+    : { variantsDiff: null, variantPairs: [] }
+
   const key = sessionKey(session, exec)
-  return { ok: true, session: key, tmpDir: sessionTmp(session, exec), outDir, canvas, scale, screens: descs, built, reference: Boolean(refPng) }
+  return {
+    ok: true,
+    session: key,
+    tmpDir: sessionTmp(session, exec),
+    outDir,
+    canvas,
+    scale,
+    unit,
+    screens: descs,
+    built,
+    assets: assets ? assetSummary : null,
+    variantsDiff: summary.variantsDiff,
+    variantPairs: summary.variantPairs,
+    reference: Boolean(refPng),
+  }
 }
 
 // ---------------------------------------------------------------- 命令
@@ -1135,6 +1573,7 @@ async function cmdBuild(args) {
 
 async function cmdLocal(args) {
   if (!args.dds) die('local 需要 --dds <dds.raw.json>')
+  const cookie = args.cookie || readCookie()
   const tree = JSON.parse(readFileSync(args.dds, 'utf8'))
   const metaFile = args.meta && existsSync(args.meta) ? JSON.parse(readFileSync(args.meta, 'utf8')) : {}
   const detected = detectScaleAndScreens(tree)
@@ -1150,19 +1589,47 @@ async function cmdLocal(args) {
   const outDir = resolveOutDir(args.out, { session: args.session })
   mkdirSync(outDir, { recursive: true })
   writeFileSync(join(outDir, 'screens.json'), JSON.stringify(descs, null, 2))
+  writeFileSync(join(outDir, 'meta.json'), JSON.stringify({ ...meta, screens: descs, compiledAt: new Date().toISOString() }, null, 2))
   const picked = args.screen === 'all' || args.screen === undefined ? screens.map((s) => s.index) : String(args.screen).split(',').map(Number)
-  let refPng = args.ref && existsSync(args.ref) ? readFileSync(args.ref) : null
+  const refPng = args.ref && existsSync(args.ref) ? readFileSync(args.ref) : null
+  let refImg = null
+  if (refPng) {
+    try { refImg = decodePng(refPng) } catch { refImg = null }
+  }
   const results = []
+  const builtEntries = []
+  const deadHosts = new Set()
+  const manifestByUrl = new Map()
+  const assetSummary = { total: 0, saved: 0, cdn: 0, alipic: 0, cropped: 0, placeholders: 0 }
+  const wantAssets = args['no-assets'] !== 'true'
+
   for (const idx of picked) {
     const s = screens[idx]
     if (!s) continue
     const compiled = compileScreen(tree, s.node, { scale: div, screenIndex: idx })
-    if (args['no-assets'] !== 'true') await localizeAssets(compiled, outDir, cookie)
-    const crop = refPng ? cropScreenPng(refPng, s.raw) : null
+    if (wantAssets) {
+      const ar = await localizeAssets(compiled, outDir, cookie, { refImg, deadHosts, manifestByUrl })
+      assetSummary.total += ar.total
+      assetSummary.saved += ar.saved
+      assetSummary.cdn += ar.cdn
+      assetSummary.alipic += ar.alipic
+      assetSummary.cropped += ar.cropped
+      assetSummary.placeholders += ar.placeholders
+    }
+    const crop = (refImg || refPng) ? cropScreenPng(refImg || refPng, s.raw) : null
     if (crop?.error) console.error(`[lanhu-dds] 屏 ${idx} 裁剪跳过：${crop.error}`)
-    results.push(writeArtifacts(outDir, { meta, tree: null, screens, screenDescs: descs, compiled, groups: findRepeatGroups(compiled), crop: Buffer.isBuffer(crop) ? crop : null }))
+    const groups = findRepeatGroups(compiled)
+    builtEntries.push({ compiled, groups, title: descs[idx].title })
+    results.push(writeArtifacts(outDir, {
+      meta, tree: null, screens, screenDescs: descs, compiled, groups,
+      crop: Buffer.isBuffer(crop) ? crop : null,
+      skipSummary: true,
+    }))
   }
-  console.log(JSON.stringify({ ok: true, outDir, screens: descs, built: results }, null, 2))
+  const summary = builtEntries.length
+    ? writeSummaryArtifacts(outDir, { meta, screenDescs: descs, builtEntries, assetStats: wantAssets ? assetSummary : null })
+    : { variantsDiff: null, variantPairs: [] }
+  console.log(JSON.stringify({ ok: true, outDir, screens: descs, built: results, variantsDiff: summary.variantsDiff, variantPairs: summary.variantPairs }, null, 2))
 }
 
 function cmdInventory(args) {
@@ -1184,9 +1651,47 @@ const PUBLIC_SCOPES = new Set([
   'tarojs', 'vant', 'vue', 'vueuse', 'react', 'babel', 'types', 'testing-library',
   'typescript-eslint', 'eslint', 'commitlint', 'changesets', 'rollup', 'vitejs',
   'nutui', 'ant-design', 'vue-', 'playwright', 'storybook', 'sentry', 'semi-design',
+  ' floating-ui'.trim(), 'iconify', 'unocss', 'tailwindcss', 'postcss', 'swc', 'esbuild',
 ])
 
+const NON_UI_PKG_RE = /(?:^|[-/])(func|utils?|tools?|sdk|rrweb[\w-]*|track[\w-]*|monitor[\w-]*|logger|commit[\w-]*|eslint[\w-]*|stylelint[\w-]*|prettier[\w-]*|tsconfig[\w-]*|vite[\w-]*|babel[\w-]*|webpack[\w-]*|rollup[\w-]*|cli|mock[\w-]*|types|hooks?|request|axios|http|bridge|jssdk|crypto|storage|埋点)(?:$|[-/])/i
+const UI_PKG_RE = /(?:^|[-/])(ui|components?|design|widgets?|mobile|vant|nutui)(?:$|[-/])/i
+const ICON_PKG_RE = /(?:^|[-/])icons?(?:$|[-/])/i
+
 const RULES_REL = '.agents/skills/lanhu-dds-codegen/project-rules.md'
+const UI_DOC_REL = '.agents/skills/lanhu-dds-codegen/ui-library.md'
+
+function classifyInternalPackages(internalPackages) {
+  const uiPackages = []
+  const iconPackages = []
+  for (const name of internalPackages) {
+    const short = name.includes('/') ? name.split('/')[1] : name
+    if (ICON_PKG_RE.test(short)) {
+      iconPackages.push(name)
+      continue
+    }
+    if (NON_UI_PKG_RE.test(short) && !UI_PKG_RE.test(short)) continue
+    if (UI_PKG_RE.test(short)) uiPackages.unshift(name)
+    else uiPackages.push(name)
+  }
+  return { uiPackages, iconPackages }
+}
+
+function detectAgentDocs(dir) {
+  const candidates = ['AGENTS.md', 'CLAUDE.md', '.cursorrules', '.github/copilot-instructions.md']
+  const found = []
+  for (const rel of candidates) {
+    try {
+      const t = readFileSync(join(dir, rel), 'utf8').trim()
+      if (t.length >= 200) found.push({ file: rel, chars: t.length })
+    } catch { /* 不存在 */ }
+  }
+  return {
+    present: found.length > 0,
+    primary: found[0]?.file ?? null,
+    files: found,
+  }
+}
 
 function pickWidth(text, key) {
   if (!text) return null
@@ -1195,8 +1700,8 @@ function pickWidth(text, key) {
 }
 
 /**
- * 判断这个项目该用哪个输出单位、规范文件有没有接入。
- * 不联网、不猜：找不到就明说找不到，交给人的那一步列成 todo。
+ * 判断这个项目该用哪个输出单位、既有 AGENTS.md / project-rules.md / ui-library.md 接入情况。
+ * 若项目根已有完备的 AGENTS.md / CLAUDE.md，直接认作主规范来源，不再强迫生成空白 project-rules.md。
  */
 export function diagnoseProject(projectDir = process.cwd()) {
   const dir = resolve(projectDir)
@@ -1218,6 +1723,7 @@ export function diagnoseProject(projectDir = process.cwd()) {
     const scope = n.slice(1).split('/')[0]
     return !PUBLIC_SCOPES.has(scope) && !PUBLIC_SCOPES.has(scope.split('-')[0])
   })
+  const { uiPackages, iconPackages } = classifyInternalPackages(internalPackages)
 
   // 单位基准：Taro 看 designWidth，其余看 postcss 转换插件
   const taroConfig = ['config/index.ts', 'config/index.js', 'config.ts', 'config.js']
@@ -1237,9 +1743,11 @@ export function diagnoseProject(projectDir = process.cwd()) {
   else if (viewportWidth === 750) { unit = 'design'; unitFrom = 'postcss viewportWidth: 750' }
   else if (viewportWidth === 375) { unit = 'css'; unitFrom = 'postcss viewportWidth: 375' }
 
+  const agentDocs = detectAgentDocs(dir)
+
   // 规范接入情况
   const rulesRaw = read(RULES_REL)
-  let rules = { present: false, unfilled: [], placeholders: 0 }
+  let rules = { present: false, delegatedTo: agentDocs.primary, unfilled: [], placeholders: 0 }
   if (rulesRaw) {
     const unfilled = []
     for (const line of rulesRaw.split('\n')) {
@@ -1250,32 +1758,35 @@ export function diagnoseProject(projectDir = process.cwd()) {
       if (!m[2].trim()) unfilled.push(label)
     }
     const placeholders = (rulesRaw.match(/（如 |（内网 |待填|TODO\(接入\)/g) ?? []).length
-    rules = { present: true, unfilled, placeholders }
+    rules = { present: true, delegatedTo: agentDocs.primary, unfilled, placeholders }
   }
 
   const todos = []
-  if (!rules.present) {
-    todos.push(`没有 ${RULES_REL}：先跑 lanhu-dds doctor --init 生成模板，再把项目真实规范填进去`)
-  } else {
-    if (rules.unfilled.length) todos.push(`project-rules.md 有 ${rules.unfilled.length} 项空着没填：${rules.unfilled.slice(0, 8).join('、')}${rules.unfilled.length > 8 ? '…' : ''}`)
-    if (rules.placeholders) todos.push(`project-rules.md 里还有 ${rules.placeholders} 处示例占位（（如 …）/（内网 …）），换成真实内容或整段删掉`)
+  if (!rules.present && !agentDocs.present) {
+    todos.push(`项目根无 AGENTS.md 且无 ${RULES_REL}：跑 doctor --init 生成模板并填入真实规范`)
+  } else if (rules.present && !agentDocs.present) {
+    if (rules.unfilled.length) todos.push(`project-rules.md 有 ${rules.unfilled.length} 项未填：${rules.unfilled.slice(0, 8).join('、')}${rules.unfilled.length > 8 ? '…' : ''}`)
+    if (rules.placeholders) todos.push(`project-rules.md 还有 ${rules.placeholders} 处示例占位，换成真实内容或删掉`)
+  } else if (rules.present && agentDocs.present && (rules.unfilled.length >= 10 || rules.placeholders >= 5)) {
+    todos.push(`项目已有 ${agentDocs.primary}，而 ${RULES_REL} 仍是未填模板（空 ${rules.unfilled.length} 项）：直接以 ${agentDocs.primary} 为准，可删掉空模板避免冲突`)
   }
+
   const ui = readUiLibrary(dir)
-  if (internalPackages.length) {
+  const targetUiPkgs = uiPackages.length ? uiPackages : iconPackages
+  if (targetUiPkgs.length) {
     if (!ui.present) {
       todos.push(
-        `没有 ${UI_DOC_REL}：先跑 doctor --ui。扫不出组件（库没装 / 只发 dist 兼容层 / 组件不在约定目录）就停下来问用户要——包名+版本、常用组件清单，或一段真实用法示例，然后按模板手写这张表。**不要凭包名猜 API。**`
+        `未生成 ${UI_DOC_REL}：跑 doctor --ui（将自动扫描 ${[...uiPackages, ...iconPackages].join('、')}）。若扫不出再向用户询问组件用法，勿凭包名猜 API`
       )
     } else if (!ui.usable) {
-      todos.push(`UI 清单不可用（${ui.components} 个组件，${ui.withProps} 个解析到 props）：${ui.askUser ?? '跟用户确认这些组件的真实用法'}`)
+      todos.push(`UI 清单不可用（${ui.components} 个组件，${ui.withProps} 个含 props）：可重跑 doctor --ui --pkg ${uiPackages[0] || targetUiPkgs[0]}，仍为空再询问用户`)
     }
-    todos.push(`识别到内网包：${internalPackages.join('、')} —— 出码前先看 ${UI_DOC_REL}，表里没有的再到 node_modules 翻源码`)
-  } else if (deps.includes('vant')) {
-    todos.push('只看到公共 vant，没识别到内网 UI 库：确认内网库包名，填进 project-rules.md')
+  } else if (!internalPackages.length && deps.includes('vant') && !agentDocs.present) {
+    todos.push('只看到公共 vant，没识别到内网 UI 库：确认是否有内网封装组件库')
   }
   if (!unit) todos.push('没找到单位基准（designWidth / rootValue / viewportWidth）：默认按 750 设计稿输出，接入时确认一次')
 
-  // 本插件的东西一律不该出现在项目里：产物、Cookie、临时脚本都在 DATA_HOME
+  // 中间文件污染检测
   const strays = []
   for (const rel of ['.agents/tmp', 'tmp', 'scratch', '.lanhu-dds', 'design/dds']) {
     if (existsSync(join(dir, rel))) strays.push(rel)
@@ -1288,13 +1799,13 @@ export function diagnoseProject(projectDir = process.cwd()) {
       continue
     }
     for (const f of entries) {
-      if (!/^(dump|probe|tmp|debug|scratch)[\w.-]*\.(mjs|js|cjs|ts)$/.test(f) && !/^screen-\d+\.(ir|rects)\.json$/.test(f)) continue
+      if (!/^(dump|probe|tmp|debug|scratch)[\w.-]*\.(mjs|js|cjs|ts)$/.test(f) && !/^screen-\d+\.(ir|rects|spec)\.(json|md)$/.test(f)) continue
       strays.push(base === '.' ? f : `${base}/${f}`)
     }
   }
   if (strays.length) {
     todos.push(
-      `${strays.length} 处中间/临时文件留在项目里（${strays.slice(0, 4).join('、')}${strays.length > 4 ? '…' : ''}）：删掉，并改用 ${DATA_HOME}（产物/临时脚本都在那里）`
+      `${strays.length} 处中间/临时文件留在项目里（${strays.slice(0, 4).join('、')}${strays.length > 4 ? '…' : ''}）：删掉，临时脚本只放 ${DATA_HOME}`
     )
   }
 
@@ -1304,8 +1815,11 @@ export function diagnoseProject(projectDir = process.cwd()) {
     packageName: pkg.name ?? null,
     framework,
     internalPackages,
+    uiPackages,
+    iconPackages,
     unit: unit ?? 'design',
     unitFrom: unitFrom ?? '未找到配置，默认 750 设计稿',
+    agentDocs,
     rules,
     ui,
     strays,
@@ -1314,64 +1828,307 @@ export function diagnoseProject(projectDir = process.cwd()) {
   }
 }
 
-/** 把 Skill 自带的 project-rules.md 模板复制到项目里，作为接入起点。 */
+/** 把 Skill 自带的 project-rules.md 模板复制到项目里，作为接入起点；若已有完备 AGENTS.md 则直接复用不建空模板。 */
 export function initProjectRules(projectDir = process.cwd()) {
   const dir = resolve(projectDir)
-  // 模板位置随分发形态不同：Skill 里在 scripts/../，插件里在 lib/../skills/lanhu-dds-codegen/
+  const dest = join(dir, RULES_REL)
+  if (existsSync(dest)) return { ok: false, error: `${RULES_REL} 已存在，不覆盖`, path: dest }
+  const agentDocs = detectAgentDocs(dir)
+  if (agentDocs.present) {
+    return {
+      ok: true,
+      skipped: true,
+      delegatedTo: agentDocs.primary,
+      note: `项目根已有 ${agentDocs.primary}，直接以它为主规范来源，不生成空白 ${RULES_REL}`,
+    }
+  }
   const src = ['../project-rules.md', '../skills/lanhu-dds-codegen/project-rules.md', './project-rules.md']
     .map((rel) => fileURLToPath(new URL(rel, import.meta.url)))
     .find((p) => existsSync(p))
   if (!src) return { ok: false, error: '找不到 project-rules.md 模板（安装包不完整）' }
-  const dest = join(dir, RULES_REL)
-  if (existsSync(dest)) return { ok: false, error: `${RULES_REL} 已存在，不覆盖`, path: dest }
   mkdirSync(dirname(dest), { recursive: true })
   writeFileSync(dest, readFileSync(src))
   return { ok: true, path: dest }
 }
 
-
-const UI_DOC_REL = '.agents/skills/lanhu-dds-codegen/ui-library.md'
-const SKIP_DIRS = /^(node_modules|\.\w|es|lib|dist|src|build|cjs|mjs|umd|types|typings|style|styles|theme|locale|locales|utils?|hooks?|_util|common|shared|assets|icons?|constants|mixins|directives|composables)$/
+const SKIP_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|components?|es|esm|lib|dist|src|build|cjs|mjs|umd|types|typings|style|styles|theme|locale|locales|utils?|hooks?|_util|common|shared|assets|icons?|constants|mixins|directives|composables)$/
+const WALK_PRUNE_DIRS = /^(node_modules|\.\w|__tests__|__mocks__|demo|demos|docs|example|examples|style|styles|theme|locale|locales|utils?|hooks?|_util|assets|constants|mixins|directives|composables)$/
 
 const pascal = (s) => s.split(/[-_]/).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('')
 
-const NOISE_PROP = /^(class|style|innerHTML|ref|key|slots?|scopedSlots|attrs|children|on[A-Z]\w*)$/
+const NOISE_PROP = /^(class|style|innerHTML|ref|key|slots?|scopedSlots|attrs|children|v-slots|modelModifiers|\$\w+|__\w+|on[A-Z]\w*)$/
 
-/** 从 .d.ts / .ts / .vue 里抠 props 字段名；from 记录取自哪个文件，解析不到就是 null。 */
-function propsOf(dir) {
-  let files = []
+/** 提取从 openBraceIdx ('{') 开始的平衡花括号内容与顶层（depth=1）属性键名。 */
+function topKeysInBrace(text, openBraceIdx) {
+  if (text[openBraceIdx] !== '{') return []
+  let depth = 0
+  let inStr = ''
+  let inLineComment = false
+  let inBlockComment = false
+  let segStart = openBraceIdx + 1
+  const topSegments = []
+
+  for (let i = openBraceIdx; i < text.length; i++) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false
+      continue
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') { inBlockComment = false; i++ }
+      continue
+    }
+    if (inStr) {
+      if (ch === '\\') { i++; continue }
+      if (ch === inStr) inStr = ''
+      continue
+    }
+    if (ch === '/' && next === '/') { inLineComment = true; i++; continue }
+    if (ch === '/' && next === '*') { inBlockComment = true; i++; continue }
+    if (ch === '\'' || ch === '"' || ch === '`') { inStr = ch; continue }
+
+    if (ch === '{') {
+      if (depth === 1 && segStart >= 0) {
+        topSegments.push(text.slice(segStart, i) + '_nested_')
+        segStart = -1
+      }
+      depth++
+      if (depth === 1) segStart = i + 1
+    } else if (ch === '}') {
+      if (depth === 1 && segStart >= 0) topSegments.push(text.slice(segStart, i))
+      depth--
+      if (depth === 0) break
+      if (depth === 1) segStart = i + 1
+    }
+  }
+
+  const keys = []
+  const body = topSegments.join('')
+  for (const rawLine of body.split(/[;\n]/)) {
+    const line = rawLine.replace(/^\s*readonly\s+/, '').trim()
+    const m = line.match(/^(['"]?)([A-Za-z_$][\w$-]*)\1\??\s*[:(]/)
+    if (!m) continue
+    const k = m[2]
+    if (NOISE_PROP.test(k)) continue
+    if (!keys.includes(k)) keys.push(k)
+  }
+  return keys
+}
+
+function extractPropsFromText(t) {
+  const keys = new Set()
+  const patterns = [
+    /(?:interface|type)\s+\w*(?:Props|Options|Attrs)\w*(?:\s*<[^>]*>)?\s*(?:=\s*)?(?:extends[^{]*)?\{/g,
+    /defineProps\s*<\s*\{/g,
+    /DefineComponent\s*<\s*\{/g,
+    /\bprops\s*:\s*\{/g,
+  ]
+  for (const re of patterns) {
+    for (const m of t.matchAll(re)) {
+      const braceIdx = m.index + m[0].length - 1
+      for (const k of topKeysInBrace(t, braceIdx)) keys.add(k)
+    }
+  }
+  return [...keys].slice(0, 14)
+}
+
+function propsOfFile(filePath, pkgDir) {
   try {
-    files = readdirSync(dir).filter((f) => /\.(d\.ts|ts|vue)$/.test(f))
+    const t = readFileSync(filePath, 'utf8')
+    const props = extractPropsFromText(t)
+    const rel = filePath.startsWith(pkgDir) ? filePath.slice(pkgDir.length + 1).replace(/\\/g, '/') : basename(filePath)
+    return { props, from: props.length ? rel : null }
   } catch {
     return { props: [], from: null }
   }
+}
+
+/** 从目录或单文件（.d.ts / .ts / .vue）抠 props 字段名；from 记录取自哪个相对路径。 */
+function propsOf(targetPath, pkgDir) {
+  let st = null
+  try { st = statSync(targetPath) } catch { return { props: [], from: null } }
+  if (st.isFile()) return propsOfFile(targetPath, pkgDir)
+
+  let files = []
+  try {
+    files = readdirSync(targetPath).filter((f) => /\.(d\.ts|ts|vue)$/.test(f))
+  } catch {
+    return { props: [], from: null }
+  }
+  // 优先读 index.d.ts / 同名 .d.ts / props.d.ts
+  files.sort((a, b) => {
+    const score = (x) => (/props/i.test(x) ? 0 : x.endsWith('.d.ts') ? 1 : 2)
+    return score(a) - score(b)
+  })
   const keys = new Set()
   let from = null
   for (const f of files) {
-    let t = ''
-    try {
-      t = readFileSync(join(dir, f), 'utf8')
-    } catch {
-      continue
+    const full = join(targetPath, f)
+    const r = propsOfFile(full, pkgDir)
+    if (r.props.length) {
+      for (const k of r.props) keys.add(k)
+      if (!from) from = r.from
     }
-    const bodies = []
-    for (const m of t.matchAll(/(?:interface|type)\s+\w*(?:Props|Options|Attrs)\w*\s*(?:=\s*)?(?:extends[^{]*)?\{([\s\S]*?)\n\}/g)) bodies.push(m[1])
-    for (const m of t.matchAll(/defineProps\s*<\s*\{([\s\S]*?)\}\s*>/g)) bodies.push(m[1])
-    for (const body of bodies) {
-      for (const line of body.split('\n')) {
-        const k = line.match(/^\s+([A-Za-z_$][\w$]*)\??\s*[:(]/)
-        if (!k || NOISE_PROP.test(k[1])) continue
-        keys.add(k[1])
+  }
+  return { props: [...keys].slice(0, 14), from }
+}
+
+function resolveModuleTarget(baseDir, spec) {
+  const clean = spec.replace(/\.(js|mjs|cjs|ts|d\.ts)$/, '')
+  const candidates = [
+    join(baseDir, `${clean}.d.ts`),
+    join(baseDir, clean, 'index.d.ts'),
+    join(baseDir, `${clean}.vue.d.ts`),
+    join(baseDir, `${clean}.vue`),
+    join(baseDir, `${clean}.ts`),
+    join(baseDir, spec),
+    join(baseDir, `${clean}.mjs`),
+    join(baseDir, `${clean}.js`),
+    join(baseDir, clean, 'index.mjs'),
+    join(baseDir, clean, 'index.js'),
+  ]
+  return candidates.find((p) => existsSync(p)) ?? null
+}
+
+function collectBarrelExports(entryAbs, pkgDir) {
+  const exported = new Map() // name -> absTargetPath | null
+  const visited = new Set()
+
+  const visit = (fileAbs, depth) => {
+    if (!fileAbs || depth > 5 || visited.has(fileAbs)) return
+    visited.add(fileAbs)
+    let t = ''
+    try { t = readFileSync(fileAbs, 'utf8') } catch { return }
+    const dir = dirname(fileAbs)
+
+    // 1. 本地声明的组件常量/类：export declare const XwButton: DefineComponent<...> 或 declare const XxxOutline ...
+    const localDecls = new Set()
+    for (const m of t.matchAll(/(?:export\s+)?(?:declare\s+)?(?:const|function|class)\s+([A-Z][\w]*)\b/g)) {
+      localDecls.add(m[1])
+      if (m[0].startsWith('export ') && !exported.has(m[1])) exported.set(m[1], fileAbs)
+    }
+    // 2. 无 from 的聚合导出：export { AddCircleOutline, XwIcon }
+    for (const m of t.matchAll(/export\s*(?:type\s*)?\{([^}]*)\}(?!\s*from)/g)) {
+      if (/^export\s+type\b/.test(m[0])) continue
+      for (const part of m[1].split(',')) {
+        const cleaned = part.replace(/\btype\s+/g, '').trim()
+        if (!cleaned) continue
+        const [orig, alias] = cleaned.split(/\s+as\s+/)
+        const name = (alias ?? orig ?? '').trim()
+        if (/^[A-Z][\w]*$/.test(name) && localDecls.has(orig.trim()) && !exported.has(name)) {
+          exported.set(name, fileAbs)
+        }
       }
     }
-    if (keys.size && !from) from = f
+    // 3. 带 from 的具名转发：export { default as XwCard, XwButton } from './xxx'
+    for (const m of t.matchAll(/export\s*\{([^}]*)\}\s*from\s*['"](\.[^'"]+)['"]/g)) {
+      const target = resolveModuleTarget(dir, m[2])
+      for (const part of m[1].split(',')) {
+        if (/^\s*type\s+/.test(part)) continue
+        const [orig, alias] = part.trim().split(/\s+as\s+/)
+        const name = (alias ?? orig ?? '').trim()
+        if (!/^[A-Z][\w]*$/.test(name)) continue
+        if (!exported.has(name)) exported.set(name, target ?? fileAbs)
+      }
+    }
+    // 4. 递归跟进多级转发：export * from './components/wealth'
+    for (const m of t.matchAll(/export\s*\*\s*(?:as\s+([A-Z][\w]*)\s+)?from\s*['"](\.[^'"]+)['"]/g)) {
+      const target = resolveModuleTarget(dir, m[2])
+      if (m[1]) {
+        if (!exported.has(m[1])) exported.set(m[1], target)
+      } else if (target) {
+        visit(target, depth + 1)
+      }
+    }
+    // 若当前 .js 入口旁边有同名 .d.ts，顺带读它的类型导出
+    if (/\.(m?js|cjs)$/.test(fileAbs)) {
+      const dts = fileAbs.replace(/\.(m?js|cjs)$/, '.d.ts')
+      if (existsSync(dts)) visit(dts, depth + 1)
+    }
   }
-  return { props: [...keys].slice(0, 12), from }
+
+  visit(entryAbs, 0)
+  return exported
+}
+
+function isAggregatorDir(subAbs, dirName) {
+  if (existsSync(join(subAbs, 'index.vue'))) return false
+  const idxFile = ['index.d.ts', 'index.mjs', 'index.js', 'index.cjs']
+    .map((f) => join(subAbs, f))
+    .find((p) => existsSync(p))
+  if (!idxFile) return false
+  let t = ''
+  try { t = readFileSync(idxFile, 'utf8') } catch { return false }
+  const hasReExport = /export\s*(?:\*|\{[^}]*\})\s*from\s*['"]\./.test(t)
+  if (!hasReExport) return false
+  const expected = pascal(dirName).toLowerCase()
+  const hasDefault = /\bexport\s+default\b|\bas\s+default\b/.test(t)
+  const hasOwnDecl = /DefineComponent|(?:interface|type)\s+\w*(?:Props|Options)\b/.test(t)
+  const mentionsSelf = new RegExp(`\\b${expected}\\b`, 'i').test(t)
+  return !hasDefault && !hasOwnDecl && !mentionsSelf
+}
+
+function walkComponentFiles(pkgDir, coveredNames) {
+  const found = []
+  const roots = ['es', 'esm', 'components', 'lib', 'src', 'dist']
+    .map((r) => ({ rel: r, abs: join(pkgDir, r) }))
+    .filter((r) => existsSync(r.abs))
+
+  const seenNames = new Set(coveredNames)
+  const walk = (dirAbs, relPrefix, depth) => {
+    if (depth > 4) return
+    let entries = []
+    try { entries = readdirSync(dirAbs, { withFileTypes: true }) } catch { return }
+
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (WALK_PRUNE_DIRS.test(e.name)) continue
+        const subAbs = join(dirAbs, e.name)
+        const subRel = `${relPrefix}/${e.name}`
+        // 目录式组件：foo/index.{d.ts,vue,js,mjs}（排除纯转发聚合目录如 wealth/index.d.ts）
+        if (
+          !SKIP_DIRS.test(e.name)
+          && ['index.d.ts', 'index.vue', 'index.mjs', 'index.js', 'index.cjs'].some((f) => existsSync(join(subAbs, f)))
+          && !isAggregatorDir(subAbs, e.name)
+        ) {
+          const compName = pascal(e.name)
+          if (!seenNames.has(compName)) {
+            seenNames.add(compName)
+            const parsed = propsOf(subAbs, pkgDir)
+            found.push({ name: compName, sub: subRel, barrel: false, props: parsed.props, propsFrom: parsed.from })
+          }
+          continue
+        }
+        walk(subAbs, subRel, depth + 1)
+      } else if (e.isFile()) {
+        // 平铺式组件文件：es/components/wealth/atoms/XwCard.d.ts 或 XwCard.vue
+        const m = e.name.match(/^([A-Z][A-Za-z0-9]+)\.(?:vue\.d\.ts|d\.ts|vue)$/)
+        if (!m) continue
+        const compName = m[1]
+        if (/(?:Props|Types|Context|Config|Constants|Helper|Util|Hook|Store|Service|Api|Enum|Event)$/i.test(compName)) continue
+        if (seenNames.has(compName)) continue
+        seenNames.add(compName)
+        const fileAbs = join(dirAbs, e.name)
+        const parsed = propsOfFile(fileAbs, pkgDir)
+        const cleanSub = `${relPrefix}/${compName}`
+        found.push({ name: compName, sub: cleanSub, barrel: false, props: parsed.props, propsFrom: parsed.from })
+      }
+    }
+  }
+
+  for (const r of roots) {
+    walk(r.abs, r.rel, 0)
+    if (found.length) break // 优先使用第一个命中的产物树（如 es/），避免与 lib/ 重复
+  }
+  return found
 }
 
 /**
- * 扫内网 UI 库安装产物。名字优先取入口 barrel 的导出名（可信），
- * 没有 barrel 才退回目录名（只能算线索，文档里标出依据）。
+ * 扫内网 UI 库安装产物：
+ *   1. 递归跟进入口 .d.ts / barrel（支持多级 `export * from` 与具名转发）；
+ *   2. 深度遍历子目录与平铺 PascalCase 组件文件（如 `es/components/wealth/atoms/XwCard.d.ts`）；
+ *   3. 识别纯图标包（如 `@xwfintech/icon-components` 的上百个 `*Outline/*Filled`），避免刷屏。
  */
 export function inspectUiLibrary(projectDir, pkgName) {
   const project = resolve(projectDir)
@@ -1381,66 +2138,67 @@ export function inspectUiLibrary(projectDir, pkgName) {
   let pj = {}
   try {
     pj = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8'))
-  } catch {
-    /* 读不到就当没声明 */
-  }
+  } catch { /* 忽略 */ }
 
-  const entryRel = [pj.module, pj.main, 'index.mjs', 'index.js', 'es/index.js', 'lib/index.js']
+  const entryCandidates = [
+    pj.types, pj.typings, 'es/index.d.ts', 'esm/index.d.ts', 'lib/index.d.ts', 'dist/index.d.ts', 'index.d.ts',
+    pj.module, pj.main, 'es/index.mjs', 'es/index.js', 'esm/index.js', 'index.mjs', 'index.js', 'lib/index.js',
+  ].filter(Boolean)
+  const entryRel = entryCandidates.find((f) => existsSync(join(pkgDir, f))) ?? null
+  const jsEntryRel = [pj.module, pj.main, 'es/index.mjs', 'es/index.js', 'index.mjs', 'index.js', 'lib/index.js']
     .filter(Boolean)
-    .find((f) => existsSync(join(pkgDir, f)))
+    .find((f) => existsSync(join(pkgDir, f))) ?? entryRel
 
-  const entryDir = entryRel ? dirname(entryRel) : '.'
   const exported = new Map()
   if (entryRel) {
-    let t = ''
-    try {
-      t = readFileSync(join(pkgDir, entryRel), 'utf8')
-    } catch {
-      /* 读不出来就没有导出名 */
-    }
-    for (const m of t.matchAll(/export\s*\{([^}]*)\}\s*from\s*['"]\.\/([\w./-]+)['"]/g)) {
-      for (const part of m[1].split(',')) {
-        const [orig, alias] = part.trim().split(/\s+as\s+/)
-        const name = (alias ?? orig ?? '').trim()
-        if (!/^[A-Za-z_$][\w$]*$/.test(name) || name === 'default') continue
-        if (!exported.has(name)) exported.set(name, m[2])
-      }
-    }
-    for (const m of t.matchAll(/export\s+(?:const|function|class)\s+([A-Z][\w]*)/g)) {
-      if (!exported.has(m[1])) exported.set(m[1], null)
+    for (const [k, v] of collectBarrelExports(join(pkgDir, entryRel), pkgDir)) exported.set(k, v)
+  }
+  if (jsEntryRel && jsEntryRel !== entryRel) {
+    for (const [k, v] of collectBarrelExports(join(pkgDir, jsEntryRel), pkgDir)) {
+      if (!exported.has(k)) exported.set(k, v)
     }
   }
 
   const components = []
-  const covered = new Set()
-  for (const [name, sub] of exported) {
-    const parsed = sub ? propsOf(join(pkgDir, entryDir, sub)) : { props: [], from: null }
-    components.push({ name, sub: sub ?? null, importPath: pkgName, barrel: true, props: parsed.props, propsFrom: parsed.from })
-    if (sub) covered.add(sub.split('/')[0])
+  const coveredNames = new Set()
+  for (const [name, targetAbs] of exported) {
+    if (/(?:Props|Options|Attrs|Instance|Expose|Emits|Slots|Theme|Locale|Config)$/i.test(name)) continue
+    let parsed = { props: [], from: null }
+    if (targetAbs) {
+      const dirCandidate = targetAbs.replace(/\/index\.(d\.ts|vue|m?js|cjs|ts)$/, '')
+      parsed = dirCandidate !== targetAbs && existsSync(dirCandidate)
+        ? propsOf(dirCandidate, pkgDir)
+        : propsOf(targetAbs, pkgDir)
+    }
+    coveredNames.add(name)
+    components.push({
+      name,
+      sub: null,
+      importPath: pkgName,
+      barrel: true,
+      props: parsed.props,
+      propsFrom: parsed.from,
+    })
   }
 
-  for (const root of ['components', 'es', 'lib', 'dist', 'src', '.']) {
-    const base = root === '.' ? pkgDir : join(pkgDir, root)
-    let entries = []
-    try {
-      entries = readdirSync(base, { withFileTypes: true })
-    } catch {
-      continue
-    }
-    for (const e of entries) {
-      if (!e.isDirectory() || SKIP_DIRS.test(e.name)) continue
-      const d = join(base, e.name)
-      if (!['index.js', 'index.mjs', 'index.cjs', 'index.d.ts'].some((f) => existsSync(join(d, f)))) continue
-      const sub = root === '.' ? e.name : `${root}/${e.name}`
-      if (covered.has(e.name) || covered.has(sub)) continue
-      covered.add(e.name)
-      const parsed = propsOf(d)
-      components.push({ name: pascal(e.name), sub, importPath: `${pkgName}/${sub}`, barrel: false, props: parsed.props, propsFrom: parsed.from })
-    }
-    if (components.length) break
+  for (const item of walkComponentFiles(pkgDir, coveredNames)) {
+    const isBarrelPkg = exported.size > 0
+    components.push({
+      ...item,
+      barrel: isBarrelPkg,
+      importPath: isBarrelPkg ? pkgName : `${pkgName}/${item.sub}`,
+    })
   }
 
-  // 全局注册库（Vue 的 GlobalComponents 增强）：模板里直接写 <Button>，不用 import
+  // 区分图标组件与普通业务 UI 组件（避免 150 个 *Outline 图标挤爆组件表）
+  const iconGlyphRe = /(?:Outline|Filled|TwoTone|Twotone|Glyph)$|^Icon[A-Z]/
+  const glyphIcons = components.filter((c) => iconGlyphRe.test(c.name) && c.props.length <= 3)
+  const isIconPack = ICON_PKG_RE.test(pkgName) || (glyphIcons.length >= 15 && glyphIcons.length >= components.length * 0.6)
+  const mainComponents = isIconPack
+    ? components.filter((c) => !iconGlyphRe.test(c.name))
+    : components
+
+  // 全局注册库检测
   let globalLib = false
   for (const f of ['index.d.ts', 'es/index.d.ts', 'types/index.d.ts', 'global.d.ts']) {
     try {
@@ -1448,18 +2206,19 @@ export function inspectUiLibrary(projectDir, pkgName) {
         globalLib = true
         break
       }
-    } catch {
-      /* 没有这个文件就跳过 */
-    }
+    } catch { /* 跳过 */ }
   }
 
   return {
     ok: true,
     pkg: pkgName,
     version: pj.version ?? null,
-    entry: entryRel ?? null,
+    entry: jsEntryRel ?? entryRel ?? null,
     global: globalLib,
-    components: components.sort((x, y) => x.name.localeCompare(y.name)),
+    isIconPack,
+    glyphCount: isIconPack ? glyphIcons.length : 0,
+    glyphSamples: isIconPack ? glyphIcons.slice(0, 20).map((c) => c.name) : [],
+    components: (isIconPack ? mainComponents : components).sort((x, y) => x.name.localeCompare(y.name)),
   }
 }
 
@@ -1475,55 +2234,113 @@ export function readUiLibrary(projectDir) {
   const withProps = components - (t.match(/（未解析到）/g) ?? []).length
   const placeholder = /（待填|TODO\(接入\)|（示例组件）/.test(t)
   const pkg = (t.match(/- 包：`([^`]+)`/) ?? [])[1] ?? null
-  const usable = components > 0 && withProps > 0 && !placeholder
+  const hasIconsOnly = components === 0 && /图标总数：\d+/.test(t)
+  const usable = ((components > 0 && withProps > 0) || hasIconsOnly) && !placeholder
   let askUser = null
-  if (!components) askUser = 'ui-library.md 是空表。向用户要：内网 UI 库包名、常用组件清单（或一段真实用法示例、内部文档链接），拿到后按表补全。'
-  else if (!withProps) askUser = `ui-library.md 里 ${components} 个组件一个 props 都没解析到。问用户要这些组件的常用 props 和一段真实用法示例，别猜。`
+  if (!components && !hasIconsOnly) askUser = 'ui-library.md 是空表。先确认 --pkg 是否指向了真正的 UI 组件包（而非工具包），仍扫不出再向用户要常用组件清单或真实用法示例。'
+  else if (components > 0 && !withProps) askUser = `ui-library.md 里 ${components} 个组件均未解析到 props。先确认 --pkg 是否为 UI 组件包，或向用户索取常用 props 与示例。`
   else if (placeholder) askUser = 'ui-library.md 里还有（待填）之类占位，跟用户确认是删掉还是补齐。'
   return { present: true, path, pkg, components, withProps, placeholder, usable, askUser }
 }
 
-export function writeUiLibraryDoc(projectDir, info) {
+function renderOnePkgSection(info) {
+  const L = []
+  L.push(`## \`${info.pkg}\`${info.version ? ` @ ${info.version}` : ''}`)
+  L.push('')
+  L.push(`- 包：\`${info.pkg}\`${info.version ? ` @ ${info.version}` : ''}`)
+  L.push(`- 入口：\`${info.entry ?? '（未声明）'}\``)
+  if (info.isIconPack) {
+    L.push(`- 类型：图标库（包装组件 ${info.components.length} 个，单图标导出 — 图标总数：${info.glyphCount}）`)
+    if (info.glyphSamples.length) {
+      L.push(`- 单图标示例（\`import { Xxx } from '${info.pkg}'\`）：${info.glyphSamples.map((n) => `\`${n}\``).join('、')}${info.glyphCount > info.glyphSamples.length ? ' …' : ''}`)
+    }
+  } else {
+    L.push(`- 组件数：${info.components.length}`)
+    L.push(`- 注册方式：${info.global ? '全局注册（检测到 `GlobalComponents`：模板直接写标签）' : '按需引入（若项目有统一 `shared.ts` 转发或 `AGENTS.md` 另有约定，以项目既有页面写法为准）'}`)
+  }
+  L.push('')
+  if (info.components.length) {
+    L.push('| 组件 | 引入 | 主要 props（启发式） | 依据 |')
+    L.push('|---|---|---|---|')
+    for (const c of info.components) {
+      const use = info.global
+        ? '全局注册，直接写标签'
+        : c.barrel
+          ? `import { ${c.name} } from '${c.importPath}'`
+          : `import ${c.name} from '${c.importPath}'`
+      const props = c.props.length ? c.props.map((x) => '`' + x + '`').join(' ') : '（未解析到）'
+      const from = c.props.length ? (c.propsFrom ?? '源码') : '无 .d.ts'
+      const cell = info.global ? use : `\`${use}\``
+      L.push(`| \`<${c.name}>\` | ${cell} | ${props} | ${from} |`)
+    }
+    L.push('')
+  }
+  return L.join('\n')
+}
+
+export function writeUiLibraryDoc(projectDir, infoOrList) {
+  const infos = (Array.isArray(infoOrList) ? infoOrList : [infoOrList]).filter((x) => x?.ok)
   const dest = join(resolve(projectDir), UI_DOC_REL)
   mkdirSync(dirname(dest), { recursive: true })
-  const rows = info.components.map((c) => {
-    const use = info.global
-      ? '全局注册，直接写标签'
-      : c.barrel
-        ? `import { ${c.name} } from '${c.importPath}'`
-        : `import ${c.name} from '${c.importPath}'`
-    const props = c.props.length ? c.props.map((x) => '`' + x + '`').join(' ') : '（未解析到）'
-    const from = c.props.length ? (c.propsFrom ?? '源码') : '无 .d.ts'
-    const cell = info.global ? use : `\`${use}\``
-    return `| \`<${c.name}>\` | ${cell} | ${props} | ${from} |`
-  })
-  const md = `# 内网 UI 组件清单
+  const totalComponents = infos.reduce((s, x) => s + x.components.length, 0)
+  const totalWithProps = infos.reduce((s, x) => s + x.components.filter((c) => c.props.length).length, 0)
 
-> 由 \`lanhu-dds doctor --ui\` 扫 \`node_modules/${info.pkg}\` 生成，库升级后重跑覆盖。
-> 组件名取自入口文件导出（可信）；没有入口 barrel 时退回目录名，「依据」列会标出文件。
-> props 只是从 \`.d.ts\` 抠出来的**字段名**，没有类型和默认值 —— 不确定就去看源码，别猜。
+  const md = `# 内网 UI 组件与图标清单
 
-- 包：\`${info.pkg}\`${info.version ? ` @ ${info.version}` : ''}
-- 入口：\`${info.entry ?? '（package.json 未声明 module/main）'}\`
-- 组件数：${info.components.length}
-- 注册方式：${info.global ? '全局注册（检测到 `GlobalComponents` 声明：`app.use(UI)` 之后模板里直接写标签，不用 import）' : '按需引入（下表「引入」列是入口导出的推断写法；若项目是 `app.use` 全量注册，以 project-rules.md 的注册方式为准）'}
+> 由 \`lanhu-dds doctor --ui\` 自动扫描 \`node_modules\` 生成，库升级后重跑覆盖。
+> 注意：若项目有 \`AGENTS.md\` 或业务模块统一的转发入口（如 \`shared.ts\`），引入路径与命名冲突规则以项目文档和同目录既有页面为准。
+> props 为从 \`.d.ts\` 提取的顶层字段名，拿不准默认值或插槽时直接 \`read\` 对应「依据」文件，不要盲猜。
 
-| 组件 | 引入 | 主要 props（启发式） | 依据 |
-|---|---|---|---|
-${rows.join('\n')}
+${infos.map(renderOnePkgSection).join('\n')}## 怎么用
 
-## 怎么用
-
-1. 出码前先在这张表里找有没有现成组件（按钮 / 单元格 / 标签 / 弹层 / 空态 / 骨架屏…）。
-2. 有 → 直接用，样式走库的 CSS 变量或 \`:deep()\` 局部覆盖。
-3. 没有 → 才手写，并在下面登记，方便反馈给库维护者。
+1. 出码前先在这张表里找现成组件（导航栏 / 卡片 / 按钮 / 单元格 / 标签 / 弹层 / 空态…）。
+2. 有 → 直接复用，微调走组件 props、CSS 变量或局部 \`:deep()\`。
+3. 没有 → 才用语义 HTML + scoped CSS 手写，并在下方登记。
 
 ## 缺组件登记
 
 （手写替代的记这里：组件名 — 用在哪 — 为什么没复用）
 `
   writeFileSync(dest, md)
-  return { ok: true, path: dest, components: info.components.length, withProps: info.components.filter((c) => c.props.length).length }
+  return {
+    ok: true,
+    path: dest,
+    packages: infos.map((x) => x.pkg),
+    components: totalComponents,
+    withProps: totalWithProps,
+  }
+}
+
+export function scanAndWriteUiDocs(projectDir, explicitPkg) {
+  const diag = diagnoseProject(projectDir)
+  if (!diag.ok) return diag
+  const targets = explicitPkg
+    ? [explicitPkg]
+    : [...diag.uiPackages, ...diag.iconPackages]
+  if (!targets.length) {
+    return { ok: false, error: '没有识别到内网 UI/图标包（已自动排除工具/SDK 包），请用 --pkg <包名> 显式指定' }
+  }
+  const infos = []
+  const errors = []
+  for (const pkg of targets) {
+    const info = inspectUiLibrary(projectDir, pkg)
+    if (info.ok) infos.push(info)
+    else errors.push({ pkg, error: info.error })
+  }
+  if (!infos.length) return { ok: false, error: errors.map((e) => e.error).join('；'), errors }
+  const w = writeUiLibraryDoc(projectDir, infos)
+  return {
+    ...w,
+    scanned: infos.map((i) => ({
+      pkg: i.pkg,
+      version: i.version,
+      isIconPack: i.isIconPack,
+      components: i.components.length,
+      glyphCount: i.glyphCount,
+      sample: i.components.slice(0, 20).map((c) => c.name),
+    })),
+    errors,
+  }
 }
 
 function cmdDoctor(args) {
@@ -1534,25 +2351,29 @@ function cmdDoctor(args) {
     console.log(JSON.stringify(r, null, 2))
     return
   }
-  if (args.init === 'true') return console.log(JSON.stringify(initProjectRules(project), null, 2))
+  const actions = {}
+  if (args.init === 'true') actions.init = initProjectRules(project)
   if (args.ui === 'true') {
+    actions.ui = scanAndWriteUiDocs(project, args.pkg)
+    if (!actions.ui.ok && !args.init) return die(actions.ui.error)
+  }
+  if (actions.init || actions.ui) {
     const diag = diagnoseProject(project)
-    if (!diag.ok) return die(diag.error)
-    const pkg = args.pkg ?? diag.internalPackages[0]
-    if (!pkg) return die('没有识别到内网 UI 包，用 --pkg <包名> 指定')
-    const info = inspectUiLibrary(project, pkg)
-    if (!info.ok) return die(info.error)
-    const w = writeUiLibraryDoc(project, info)
-    console.log(`[lanhu-dds] ${pkg} 识别到 ${w.components} 个组件 → ${w.path}`)
-    return console.log(JSON.stringify({ ...w, components: info.components.map((c) => c.name) }, null, 2))
+    console.log(JSON.stringify({ ok: true, ...actions, diagnosis: diag }, null, 2))
+    return
   }
   const r = diagnoseProject(project)
   if (!r.ok) return die(r.error)
+  const rulesSummary = r.rules.present
+    ? `已接入 project-rules.md（空 ${r.rules.unfilled.length} 项、占位 ${r.rules.placeholders} 处）`
+    : r.agentDocs.present
+      ? `由 ${r.agentDocs.primary} 承载（免建 project-rules.md）`
+      : '未接入'
   const lines = [
     `项目：${r.packageName ?? '(未命名)'}　框架：${r.framework.join(' / ') || '(未识别)'}`,
     `输出单位：--unit ${r.unit}　依据：${r.unitFrom}`,
-    `内网包：${r.internalPackages.join('、') || '(未识别)'}`,
-    `规范文件：${r.rules.present ? `已接入，空 ${r.rules.unfilled.length} 项、占位 ${r.rules.placeholders} 处` : '未接入'}`,
+    `内网 UI 包：${r.uiPackages.join('、') || '(无)'}　图标包：${r.iconPackages.join('、') || '(无)'}　其他内网包：${r.internalPackages.filter((x) => !r.uiPackages.includes(x) && !r.iconPackages.includes(x)).join('、') || '(无)'}`,
+    `规范来源：${rulesSummary}`,
     r.ready ? '状态：可以开工' : `待办 ${r.todos.length} 条：`,
     ...r.todos.map((t) => `  · ${t}`),
   ]
@@ -1567,7 +2388,7 @@ const main = async () => {
   if (cmd === 'local') return cmdLocal(args)
   if (cmd === 'inventory') return cmdInventory(args)
   if (cmd === 'doctor') return cmdDoctor(args)
-  die('用法：\n  lanhu-dds.mjs build --url "<链接>" --out <目录> [--screen all|0,1] [--list]\n  lanhu-dds.mjs local --dds <dds.raw.json> [--meta meta.json] --out <目录> [--screen 0]\n  lanhu-dds.mjs inventory --dds <dds.raw.json>\n  lanhu-dds.mjs doctor [--project <项目目录>] [--init] [--ui [--pkg <包名>]]')
+  die('用法：\n  lanhu-dds.mjs build --url "<链接>" [--out <目录名>] [--screen all|0,1] [--list]\n  lanhu-dds.mjs local --dds <dds.raw.json> [--meta meta.json] [--out <目录名>] [--screen 0]\n  lanhu-dds.mjs inventory --dds <dds.raw.json>\n  lanhu-dds.mjs doctor [--project <项目目录>] [--init] [--ui [--pkg <包名>]] [--prune [--days 7]]')
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) main().catch((e) => die(e.stack ?? String(e)))

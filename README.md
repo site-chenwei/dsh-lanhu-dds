@@ -14,36 +14,26 @@
 | 能力 | 名字 | 作用 |
 |---|---|---|
 | 工具 | `lanhu_dds_screens` | 列出设计图里的所有手机屏（一张图常横排 5~10 屏），含尺寸/节点数/是否整图/导航标题 |
-| 工具 | `lanhu_dds_build` | 编译指定屏：设计稿裁图、结构 IR、像素几何表、参考 HTML、组件切分大纲、设计 token、体检报告、本地切图 |
-| 工具 | `lanhu_dds_doctor` | 项目接入自检：该用哪个 `unit`、识别到哪些内网包、扫 UI 库生成组件清单、`project-rules.md` 还空着几项 |
-| Skill | `lanhu-dds-codegen` | 还原流程：接入自检 → 选屏 → 编译 → 读项目规范 → 出码 → 几何/视觉验收 |
+| 工具 | `lanhu_dds_build` | 编译指定屏：产出单文件紧凑规格表 `screen-N.spec.md`、设计稿裁图 `screen-N.png`、多屏变体差异 `variants-diff.md`、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退 |
+| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md` |
+| Skill | `lanhu-dds-codegen` | 一页一闭环增量还原流程：自检 → 选屏 → 编译 → 逐页读 `spec.md`+`png` 出码 → 静态门禁验收 |
 
 ## 接入（内网装完之后的第一件事）
 
-插件和 Skill 是**通用**的，项目特异的那一半在 `project-rules.md`。不填它，模型就会拿模板里的占位示例当规范——`@company/ui`、`UiButton` 这些词一个都不存在，编出来的代码不能编译。
+```js
+// 1. 直接自检（自动定位当前会话工作目录，无需手传 project）
+lanhu_dds_doctor({})
 
-```bash
-# 1. 生成规范模板（已存在不覆盖）
-lanhu_dds_doctor({ project: "/path/to/project", init: true })
-
-# 2. 扫内网 UI 库 → ui-library.md（真实组件名 + 导入路径 + 尽力解析的 props）
-lanhu_dds_doctor({ project: "/path/to/project", ui: true })
-#    扫不出东西（库没装 / 只发 dist / 没有 .d.ts）时，doctor 的 ui.askUser 会告诉你该问用户什么
-
-# 3. 人工填规范里剩下的空格：技术栈 / 目录 / token / 字体 / 数据层
-# 4. 再查一次，直到 ready: true
-lanhu_dds_doctor({ project: "/path/to/project" })
+// 2. 自动扫描内网 UI 组件库与图标库 → .agents/skills/lanhu-dds-codegen/ui-library.md
+//    （若项目没有 AGENTS.md，可同时传 init: true 生成 project-rules.md 模板）
+lanhu_dds_doctor({ ui: true })
 ```
 
-`doctor` 输出三件事：
+`doctor` 自动处理三件事：
 
-- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`（75 → `design`，37.5 → `css`）。不用猜，也不用问人。
-- **`internalPackages`**：`package.json` 里非公共 scope 的依赖，就是你们的内网 UI 库。拿去 `node_modules/<包>/es/` 翻真实组件名。
-- **`rules.unfilled` / `rules.placeholders`**：规范文件还空着哪些格子、还有几处 `（如 …）` `TODO(接入)` 没换掉。
-
-`ui` 那一步不靠人抄文档：它直接读 `node_modules/<内网包>/es|lib|dist/` 的目录结构，组件名与导入路径是**确定信息**；props 从 `.d.ts` 里尽力解析，解析不到的标「看源码」。库升级后重跑覆盖即可。
-
-`ready: false` 时不要开始还原——那正是模型自由发挥的地方。
+- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。
+- **`agentDocs` 与 `rules`**：若项目根已有完备的 `AGENTS.md` / `CLAUDE.md`，直接认作主规范来源，不再强制生成空白 `project-rules.md` 避免冲突。
+- **`uiPackages` / `iconPackages`**：自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等工具包，递归跟进多级 `export * from` 与深层组件 `.d.ts`（含 `DefineComponent<{...}>`、`interface *Props`），生成 `ui-library.md`。
 
 ## 安装
 
@@ -132,18 +122,16 @@ lanhu_dds_doctor({ forget: true })
 
 其余的 `.agents/tmp/`、`dump-*.mjs`、`design/dds/`、`screen-*.json` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`。
 
-每屏产物：
+每屏与汇总产物：
 
 | 文件 | 作用 |
 |---|---|
+| `screen-N.spec.md` | **主输入**：单文件紧凑规格表（组件候选 + 屏内 `(0,0)` 坐标 + 父相位移 + 兄弟间距 + 完整样式 + 文案 + 切图路径） |
 | `screen-N.png` | 设计稿裁图（视觉唯一真相） |
-| `screen-N.ir.json` | 结构树：box / 文案 / 颜色 / 字号 / flex 语义 |
-| `screen-N.rects.json` | 扁平几何表，可直接和 DOM `getBoundingClientRect` 比对 |
-| `screen-N.html` | 绝对定位参考渲染（带 `data-dds`，可截图做像素 diff） |
-| `screen-N.outline.md` | 缩进大纲 + 重复结构 → 组件候选 |
-| `tokens.css` | 颜色/字体 token（含 Windows 雅黑兜底） |
-| `report.md` | 屏清单 + DDS 缺口告警 |
-| `assets/` | 切图 + `manifest.json`（不放蓝湖 CDN 地址） |
+| `variants-diff.md` | 多屏编译时自动识别同页面状态/弹层变体并列出差异块 |
+| `tokens.css` / `report.md` | 多屏汇总的颜色/字体 token 与体检报告（不覆盖前序屏） |
+| `assets/` | 本地切图 + `manifest.json`（内置 `lanhu-oss-*` → `alipic.lanhuapp.com` 带 Cookie+Referer 内网镜像回退 + 原图无遮挡裁切） |
+| `screen-N.ir.json` / `rects.json` / `html` | 原始树结构（屏内相对坐标）、几何表与参考 HTML（备查） |
 
 ## 为什么不用 lanhu-mcp
 

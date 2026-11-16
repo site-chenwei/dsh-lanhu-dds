@@ -132,12 +132,14 @@ scale = 屏宽(设备px) / 375      // 750 → 2x，1125 → 3x
 
 带 HTML 实体：`2026-11-05&nbsp;10:49`。必须先解码再转义，否则页面显示字面 `&nbsp;`。也见过 `&lt;br&gt;` 表示换行。
 
-### 5.4 图片
+### 5.4 图片与内网镜像域名替换
 
-`data.value` 是切图 URL（`https://lanhu-oss-*.lanhuapp.com/FigmaDDSSlicePNG*.png`）。
-- 这类 CDN **不校验 Cookie**，可直接 HTTP 拉取。
-- 尺寸通常是 CSS 的 2/3 倍（@2x/@3x），用 `background-size: 100% 100%` 或 `<img>` + `object-fit` 适配。
-- 参考图（整张画布）在 `alipic.lanhuapp.com`，**需要 Cookie + Referer**，和切图不是一回事。
+`data.value` 是切图 URL（形如 `https://lanhu-oss-2537-2.lanhuapp.com/FigmaDDSSlicePNG*.png`）：
+- 公网环境下，`lanhu-oss-*.lanhuapp.com` 不校验 Cookie，可直接拉取。
+- **内网环境关键事实**：许多企业内网放行 `lanhuapp.com`、`dds.lanhuapp.com`、`alipic.lanhuapp.com`，但拦截 `lanhu-oss-*.lanhuapp.com`（表现为 TLS 证书校验失败 `SEC_E_WRONG_PRINCIPAL` 或 HTTP 403）。此时将域名替换为 **`https://alipic.lanhuapp.com/<原路径>`**（例如 `https://alipic.lanhuapp.com/FigmaDDSSlicePNGxxx.png`），并携带蓝湖 `Cookie` 与 `Referer: https://lanhuapp.com/`，即可拿到**逐字节完全一致**的原始切图（注意：不带 Cookie + Referer 访问 `alipic.lanhuapp.com` 会返回 403 空包）。
+- `lanhu-dds.mjs` 的 `localizeAssets` 已内置「`lanhu-oss-*` 同域熔断 → `alipic.lanhuapp.com` 镜像带 Cookie+Referer → `reference.png` 无文字遮挡裁切」三级自动回退。
+- 切图分辨率通常是逻辑宽的 2/3 倍（@2x/@3x），用 `background-size: 100% 100%` 或 `<img>` + `object-fit` 适配。
+- 参考图（整张画布原图）同样在 `alipic.lanhuapp.com`，必须带 `Cookie` + `Referer: https://lanhuapp.com/`。
 
 ## 6. 一次编译要扔掉的节点
 

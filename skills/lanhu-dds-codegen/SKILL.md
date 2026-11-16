@@ -6,294 +6,136 @@ whenToUse: 用户给出蓝湖设计图链接要求实现页面或组件；用户
 
 # 蓝湖 DDS 代码还原
 
-DDS（转代码）是蓝湖给的结构化产物：一棵带**画布绝对坐标**的布局树，比截图靠谱，比 MCP 的扁平 CSS 提示完整。它给你四样东西——几何、文案、颜色、**阴影与渐变**；它给不了三样东西——响应式、交互态、图标矢量。**你的工作是把前者变成代码，把后者补上。**
+DDS（转代码）是蓝湖提供的结构化布局树。编译器已将它加工成**屏内相对坐标 `(0,0)` + 父相位移 + 兄弟间距 + 完整样式 + 文案**的单屏紧凑规格表 `screen-N.spec.md` 与单屏裁图 `screen-N.png`。
 
-## 0. 流程总览
-
-```
-蓝湖链接 → ① 选屏 → ② 编译成产物 → ③ 读项目规范 → ④ 按产物写代码 → ⑤ 几何+视觉验收
-```
-
-任何一步都别跳。尤其 **① 选屏**：一张设计图往往横排 5~10 台手机屏，选错屏后面全白做。
-
-## 1. 准备：Cookie 存在一个固定位置
-
-Cookie 只存一个地方：**`~/.dsh-lanhu-dds/cookie`**（可用 `DSH_LANHU_DDS_HOME` 改根目录，权限 0600）。工具每次调用都读它，不读环境变量、不读 `.env`、不读配置。
-
-工作方式是固定的三步：
-
-1. **有文件 → 直接用**，你不用管，也不要问用户。
-2. **没有文件 → 向用户要**。工具返回 `missing-cookie`，把里面 `say` + `howToGet` 原样转给用户，然后停。不要伪造、不要换个接口绕、不要跳过选屏照裁图编代码。
-3. **用户给了 → 先验证再落盘**。工具会拿这个值真读一次设计图：通过就写进 `~/.dsh-lanhu-dds/cookie`（返回里有 `cookieSavedTo`），以后的会话直接复用；不通过返回 `cookie-expired`，**不会存坏值**。
-
-用户说过「我配了环境变量 / 我在 .env 里写了」→ 回答：这里只认那一个文件，其它方式不生效。让他把 Cookie 贴一次，剩下交给工具。
-
-换号、或者返回 `cookie-expired` 且重取也没用 → 可能账号本身没有该项目权限，让用户确认登录的是哪个号。要清掉已存的：`lanhu_dds_doctor({ forget: true })` 或删掉那个文件。
-
-拿法：浏览器登录蓝湖 → F12 → Network → 任选一个 `lanhuapp.com` 请求 → 复制完整 `Cookie` 请求头。
-**Cookie 是凭据：不要写进代码、不要提交、不要在回复里回显。**
-
-命令行形态同一件事：`--cookie "<值>"`（验证通过同样会存到那个文件）。
-
-## 2. 选屏（必做）
-
-> 两种入口，产物完全一致：**环境里有 `lanhu_dds_screens` / `lanhu_dds_build` 工具**（装了 `dsh-lanhu-dds` 插件）就直接用工具，参数与下面的命令行一一对应；没有就跑本 Skill 目录下的脚本。下文用命令行为例。
-
-```bash
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build --url "<蓝湖链接>" --list
-```
-
-输出每屏的 `index / 尺寸 / 节点数 / raster / title / texts`。读它，然后决定做第几屏：
-
-- `title` 是导航栏标题，通常就是屏的名字。
-- `raster: true` 表示这屏在 DDS 里是一张整图，**没有任何结构**——直接告诉用户「这屏 DDS 无法还原，需要设计源文件或人工切图」，不要硬写代码。
-- 一屏固定 375 逻辑宽（脚本已按 `屏宽/375` 推出缩放比，@2x/@3x 自动处理）。
-
-一次做完所有需要的屏也可以：`--screen 0,2,5` 或 `--screen all`。**屏数超过 3 个时先跟用户确认要哪几屏**，别默认全做。
-
-## 3. 编译
-
-```bash
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs build \
-  --url "<蓝湖链接>" --screen 0
-```
-
-**产物按会话隔离，位置固定，不要自己造**：
+## 0. 执行铁律（一页一闭环，禁止全量预读空转）
 
 ```
-~/.dsh-lanhu-dds/                 # DSH_LANHU_DDS_HOME 可改根
-├── cookie                        # 唯一一份，跨会话共用
-└── sessions/
-    └── <会话标识>/                # 插件自动取当前 DSH 会话 id（前 12 位）；命令行取时间戳
-        ├── tmp/                  # 本次会话的临时脚本
-        └── <设计图名>-<id8>/      # 本次会话的产物，重跑先清空再写
+① doctor 检查项目规范与 UI 库 → ② screens 选屏 → ③ build 编译所需屏
+   ↓
+④ 逐页增量闭环（每次只处理 1 个路由页面及其状态变体屏）：
+   读本页 screen-N.spec.md + screen-N.png (+ variants-diff.md) + 本页既有源码
+   → 写完本页代码 → 跑本页静态门禁 → 再进入下一页
 ```
 
-- 两次对话的产物互不覆盖，也不堆在根目录下。工具返回里带 `session` 和 `tmpDir`，要落临时脚本就用返回的 `tmpDir`，别自己拼路径。
-- `--out` / `out` 只接受**一层目录名**（如 `订单列表`），带斜杠或 `..` 一律拒绝。
-- `--session <名>` / `session` 参数只在**要跨会话复用同一份产物**时用，平时不要填。
-- 产物不进项目——它是可重新生成的证据，不是源码。
+1. **多页任务必须一页一闭环**：当任务涉及多个页面（例如同时改首页、列表、详情、确认页）时，**严禁**先把所有页面的旧源码和所有屏的裁图/产物一次性全读进上下文再去构思全局！一次只读当前这 1 个页面的规格表、裁图与对应源码，把这一页真正 `write`/`edit` 落盘并过完静态校验后，再处理下一页（不限制单页内的必要核查，但未写完当前页前不预读下一页）。
+2. **直接读 `screen-N.spec.md` 出码，禁止自写解析脚本**：`screen-N.spec.md` 已经算好屏内 `(0,0)` 坐标、父容器偏移 `rel(dx,dy)`、兄弟间距 `↑gap`/`←gap`、flex 属性、颜色字号圆角阴影与文案。**禁止**在思考过程里心算画布绝对坐标减法，**禁止**手写 `dump-ir.cjs`、`rects-rel.cjs`、PowerShell 裁图脚本去拆 `ir.json`。
+3. **压缩上下文的时机**：只在**某一页代码已落盘并通过静态检查之后**，才把该页已消费的规格表/截图读取记录压缩掉；**严禁**在还没写任何代码前把刚读完的源文件压掉导致失忆重读。
 
-**项目里该写什么，分两类**：
+## 1. 准备：Cookie 固定存一处
 
-| 该写（接入件，应提交） | 不该写（都是污染） |
+Cookie 唯一存放路径：**`~/.dsh-lanhu-dds/cookie`**（可用 `DSH_LANHU_DDS_HOME` 改根目录，权限 0600）。不读环境变量、不读 `.env`、不读配置。
+
+1. **文件存在 → 自动复用**，无需询问用户。
+2. **文件不存在 → 工具返回 `missing-cookie`**：把返回里的 `say` + `howToGet` 转述给用户（可用 `ask_user_question`）并停下等待。不要伪造、不要凭想象盲写页面。
+3. **用户贴回 Cookie → 先验证再落盘**：传给 `lanhu_dds_screens` 或 `lanhu_dds_build` 的 `cookie` 参数（CLI 为 `--cookie "<值>"`），工具真读一次设计图验证通过后自动写入 `~/.dsh-lanhu-dds/cookie`，后续会话永久复用；若返回 `cookie-expired` 则提示用户换有效账号重取，工具绝不落盘坏值。
+
+获取方式：浏览器登录蓝湖 → F12 → Network → 任一 `lanhuapp.com` 请求 → 复制完整 `Cookie` 请求头。
+**安全红线**：Cookie 等同登录态，严禁写进业务代码、提交仓库或在回复正文回显明文。清除旧值用 `lanhu_dds_doctor({ forget: true })`。
+
+## 2. 查项目规范与 UI 库（先跑 doctor）
+
+> 环境里有 `lanhu_dds_doctor` / `lanhu_dds_screens` / `lanhu_dds_build` 工具（已装 `dsh-lanhu-dds` 插件）时直接调工具（`lanhu_dds_doctor` 会自动定位当前会话工作目录，无需手传 `project`）；纯 Skill 环境跑 `node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs <子命令>`。
+
+1. 调 `lanhu_dds_doctor({})`（CLI：`doctor`），一次性拿到：
+   - **输出单位 `--unit`**：自动读取 `config` 的 `designWidth`（750 → `design`；375 → `css`）或 `postcss` 的 `rootValue`/`viewportWidth`。
+   - **项目主规范来源**：
+     - 若项目根已有完备的 **`AGENTS.md` / `CLAUDE.md`**，`doctor` 直接认它为最高准则（`rules.delegatedTo: "AGENTS.md"`），**不要**再跑 `init` 生成空白 `project-rules.md` 制造冲突。
+     - 若项目既无 `AGENTS.md` 也无 `.agents/skills/lanhu-dds-codegen/project-rules.md`，才跑 `lanhu_dds_doctor({ init: true, ui: true })` 生成模板并结合仓库现状补齐。
+   - **内网 UI 组件库与图标库（`uiPackages` / `iconPackages`）**：
+     - `doctor` 已自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等非 UI 工具包。
+     - 若 `ui.present === false`，调 `lanhu_dds_doctor({ ui: true })` 自动递归扫描内网 UI 包与图标包，生成 `.agents/skills/lanhu-dds-codegen/ui-library.md`（支持同时传 `{ init: true, ui: true }`）。
+     - 若扫描后 `ui.usable === false`，再按 `ui.askUser` 向用户索取组件清单或用法示例，**严禁凭包名盲猜组件名与 props**。
+2. 开工写第 1 页前，读一遍项目主规范（`AGENTS.md` 或 `project-rules.md`）、`ui-library.md`、全局主题变量文件（如 `src/styles/theme.css`）及业务目录共享入口（如 `shared.ts`、路由 hook）。**禁止**把模板文件里的占位示例（如 `@company/ui` 或被项目禁用的路由 API）抄进业务代码。
+
+## 3. 选屏与编译
+
+### 3.1 选屏（必做）
+
+调 `lanhu_dds_screens({ url })`（CLI：`build --url "<链接>" --list`）。一张蓝湖画布通常横排 5~10 台手机屏：
+
+- 看每屏 `index / width×height / nodes / raster / title / texts`。
+- `raster: true` 说明该屏在设计稿里只是一张合并位图，无图层结构——直接告知用户该屏无法由 DDS 结构化还原。
+- 屏数较多且用户未指明具体屏时，把屏序号与业务页面对应关系列给用户确认一次（如 `0,1,3,4,7,8`），再调 `build`。
+
+### 3.2 编译与产物消费优先级
+
+调 `lanhu_dds_build({ url, screens: "0,1,..." })`（CLI：`build --url "<链接>" --screen 0,1`）。产物落在 `~/.dsh-lanhu-dds/sessions/<会话>/` 下，按会话自动隔离，**严禁拷入项目目录**：
+
+| 优先级 | 文件 | 作用与正确读法 |
+|---|---|---|
+| **1（主输入）** | **`screen-N.spec.md`** | **单屏紧凑规格表（几 KB）**：含组件候选、缩进层级、屏内 `(0,0)` 坐标 `@(x,y w×h)`、父偏移 `rel(dx,dy)`/`=parent`、前兄弟间距 `↑gap`/`←gap`、flex 布局、颜色/字号/行高/圆角/边框/阴影、本地切图路径与文案。**写某屏前直接 `read` 它，无需读 `ir.json`。** |
+| **1（主输入）** | **`screen-N.png`** | 该屏设计稿裁图（视觉唯一真相）：核对整体视觉、图标语义、`c:MISSING` 文本真实颜色与描边细节。 |
+| **2（多屏必读）** | **`variants-diff.md`** | 当编译多屏时自动识别「同页面的不同状态/弹层变体」（如基础详情页 ↔ 规格弹窗、空地址 ↔ 有地址），直接列出两屏差异块，合在同一个页面组件里用状态/弹层实现。 |
+| **2（总览）** | **`report.md` / `tokens.css`** | 全部已编译屏的汇总体检报告、切图落盘统计与高频色值/字体候选。 |
+| 3（备查） | `screen-N.html` / `ir.json` / `rects.json` | 仅在个别极端节点需排查原始字段时才按需查看，常规还原不必读取。 |
+| **资源** | **`assets/` + `manifest.json`** | 已本地化的切图，业务需要的图片拷入项目静态资源目录，**严禁在代码里直接引用蓝湖线上 URL**。 |
+
+### 3.3 内网切图域名替换规则（`lanhu-oss-*` → `alipic.lanhuapp.com`）
+
+内网环境通常放行 `lanhuapp.com`、`dds.lanhuapp.com` 与 `alipic.lanhuapp.com`，但会拦截 `lanhu-oss-*.lanhuapp.com`（表现为 TLS 证书报错 `SEC_E_WRONG_PRINCIPAL` 或 HTTP 403）。
+
+- **标准解法**：把切图 URL 的域名 `https://lanhu-oss-<任意后缀>.lanhuapp.com/<文件路径>` 直接替换为 **`https://alipic.lanhuapp.com/<文件路径>`**，并携带蓝湖 `Cookie` 与 `Referer: https://lanhuapp.com/` 请求，即可拿到与原 CDN 逐字节一致的真切图。
+- **编译器已内置三级自动回退**：
+  1. 直连原 `lanhu-oss-*.lanhuapp.com`（某域名首次失败立即同域熔断，不逐张卡超时）；
+  2. **自动改写为 `https://alipic.lanhuapp.com/<文件路径>`（带 Cookie + Referer）下载原始切图**；
+  3. 若仍失败且该节点在画布上无文字叠加遮挡，自动从 `reference.png` 裁切兜底；若有文字叠加则剥除死链并在 `spec.md` 标为 `img:PLACEHOLDER(...)`（通常是渐变横幅底图，直接用 CSS 渐变 + 修饰块实现）。
+- **严禁排障死循环**：编译器跑完后，`report.md` 与返回结果里的 `assets` 字段已是最终结果。若个别资源仍为 `PLACEHOLDER`，直接按 CSS/占位处理并在交付说明列出，**禁止**再去跑 `curl` / `Invoke-WebRequest` / `rejectUnauthorized: false` 反复探测 `lanhu-oss-*`。如确需手工补拉某张蓝湖图片，一律换用 `https://alipic.lanhuapp.com/<文件路径>` + `~/.dsh-lanhu-dds/cookie` + `Referer: https://lanhuapp.com/`。
+
+**项目里该写什么 vs 污染红线**：
+
+| 应写入项目（正常接入件与交付物） | 严禁写入项目（中间污染） |
 |---|---|
-| `.agents/skills/lanhu-dds-codegen/project-rules.md` —— 项目规范，一次填好长期用 | 产物拷贝：`design/dds/`、`screen-*.json`、`.lanhu-dds/` |
-| `.agents/skills/lanhu-dds-codegen/ui-library.md` —— 内网 UI 组件清单，库升级重生成 | 临时脚本：`.agents/tmp/dump-ir.mjs`、`probe-*.mjs`、根目录 `dump-*.json` |
-| 你要交付的业务代码 | 猜出来的中间态文件（`tmp`、`scratch`、`test2.js`） |
+| 业务页面/组件源码与拷入项目静态目录的正式图片 | `design/dds/`、`.lanhu-dds/`、`screen-*.json`、`screen-*.spec.md` |
+| `.agents/skills/lanhu-dds-codegen/ui-library.md`（及无 `AGENTS.md` 时的 `project-rules.md`） | `.agents/tmp/`、`dump-ir.*`、`rects-rel.*`、`crop.ps1` 等任何临时脚本（确需临时文件只放 `build` 返回的 `tmpDir`） |
 
-要读 IR/rects 就直接 `jq`、`node -e`、`cat`，不用落脚本；确实需要一个临时脚本时写到**当前会话的** `~/.dsh-lanhu-dds/sessions/<会话>/tmp/`（父目录里就有，别再往下堆）。`lanhu_dds_doctor` 会把不该写的扫出来（返回 `strays`）。
+## 4. 冲突裁决优先级
 
-产物（每屏一套）：
+1. **项目既有规范（`AGENTS.md` / `project-rules.md` / 同目录既有页面）** 决定技术栈、组件引入路径、路由方式、样式变量名。
+2. **`screen-N.png`（设计稿裁图）** 决定视觉真值：`spec.md` 标 `c:MISSING(看裁图)` 的文字颜色、图标长相、细节层次一律看裁图。
+3. **`screen-N.spec.md` 的几何与样式数值** 决定尺寸、间距、`linear-gradient`、`boxShadow`、圆角（默认 `unit=design` 即 750 设计稿 px，直接写进样式交给构建期 `pxtransform` / `postcss-px-to-rem` 换算，**不要手动除以 2**）。
 
-| 文件 | 作用 | 怎么用 |
+## 5. 出码规范
+
+### 5.1 组件复用与结构映射
+
+- **内网 UI 库 / 共享组件优先，不重复造轮子**：先查 `ui-library.md` 与业务模块 `shared.ts`。导航栏、卡片、按钮、标签、单元格、弹层、空态、协议勾选等优先用现成组件；默认样式与设计稿差 2–4px 属组件库正常刻度，用组件 props、CSS 变量或局部 `:deep()` 微调，禁止全局 `!important` 或修改 `node_modules`。
+- **同构重复块必抽组件**：`spec.md` 顶部「组件候选」列出的同父同宽重复块，抽成独立子组件或 `v-for` 渲染，不复制粘贴 N 份模板。
+- **同路由多状态合页**：`variants-diff.md` 配对的状态屏（如详情页 + 购买规格 Popup、确认页无地址 + 有地址）写在同一个页面/组件体系内，通过状态切换还原，保留原页面的接口调用、Store、路由参数与业务逻辑不丢失。
+- **语义流式布局**：按 `spec.md` 的 `col`/`row`、`pad:`、`↑gap`/`←gap` 用 Flex/Grid 写正常文档流；`=parent` 代表包装层与父同框，合并冗余层级避免双倍内边距；**禁止**照搬 `screen-N.html` 的全屏 `position: absolute`。
+- **标签体系遵循目标平台**：Taro H5 / Vue Web 项目按项目既有页面使用标准 HTML 标签（`div/span/img/button`）与内网组件（除非项目自身规范要求小程序标签）。
+
+### 5.2 图标与图片处理
+
+- **图标优先换项目图标库，找不到的做语义占位**：
+  1. 若项目装了图标库（见 `ui-library.md` 图标章节或既有页面），直接换对应语义图标组件。
+  2. 图标库里没有的（如定制金条/营销徽章），若 `assets/` 已通过 `alipic` 拉下干净 PNG，可拷入项目静态目录使用；若是待替换小图标，也可写带精确宽高的语义占位块（保留 `aria-label` 或 `aria-hidden="true"`，不留 404 链接），并在最终交付说明列出待办。
+- **业务内容图**：商品主图、规格缩略图使用 `assets/` 已落盘的本地图片或保留原页面动态接口字段 `item.imgUrl`（静态兜底图指向本地资源）；带文字叠加的横幅底图若为 `PLACEHOLDER`，直接用 `spec.md` 给出的渐变/底色实现。
+
+## 6. 分级验收（适配内网网关项目）
+
+### 6.1 默认必过门禁（静态校验，不强制起本地服务）
+
+许多内网 H5 项目依赖网关代理、登录态或商户初始化配置才能在浏览器打开路由。**默认验收采用静态门禁，禁止因本地起不来页面而卡住或去写截图对比脚本**：
+
+1. **项目自身静态检查**：运行项目 `package.json` / `AGENTS.md` 规定的检查命令（如 `eslint`、`vue-tsc` / `tsc --noEmit`、`prettier --check`；若项目声明无测试框架，不要跑不存在的 `npm test`）。
+2. **规格表逐项自检**：对照 `screen-N.spec.md` 与旧页面源码，确认：① 核心文案、价格/状态色值（尤其 `c:MISSING` 项）、渐变与圆角未漏；② 原页面接口取数、路由跳转参数、事件处理未在重构中被误删；③ 无残留在项目里的临时文件（可跑一次 `lanhu_dds_doctor` 确认 `strays` 为空）。
+
+### 6.2 浏览器 DOM 几何校验（仅当页面已在本地可访问或用户明确要求时）
+
+若当前页面可在本地直接打开且用户要求像素级 DOM 复核，可在页面根元素加 `data-check-root` 并在浏览器控制台对比 `screen-N.rects.json`（`const K = 750 / document.documentElement.clientWidth`，差值 ≤ 3 设计 px 视为通过）。
+
+### 6.3 交付汇总清单
+
+全部目标页面完成后，清晰列出：
+- **改了什么**：逐页对应哪几屏（`screen-N`）、复用了哪些内网组件、抽了哪些新子组件、保留了哪些原有业务交互。
+- **怎么验证**：实际跑过的静态门禁命令与结果。
+- **图标/资源待办与残留风险**：占位图标清单（位置 + 建议替换的图标名）、DDS 未覆盖的交互边界（如有）。
+
+## 7. 两种运行方式与零依赖说明
+
+| 维度 | 纯 Skill（CLI） | Skill + `dsh-lanhu-dds` 插件 |
 |---|---|---|
-| `screen-N.png` | 该屏的设计稿裁图（已从整张画布裁好） | **视觉唯一真相**：阴影、图标形态、图形细节看它（渐变与圆角 DDS 本身已给全） |
-| `screen-N.ir.json` | 结构树：每个节点的 box、文案、颜色、字号、flex 语义、`dds` id | 写代码的主要依据 |
-| `screen-N.rects.json` | 扁平几何表 `{idx,dds,x,y,w,h}`，屏内相对坐标 | 验收基线，可直接和 DOM 比对 |
-| `screen-N.html` | 绝对定位参考渲染，含 `data-dds` 标记 | 拿不准某处层级/坐标时打开看；也可截图做像素对比 |
-| `screen-N.outline.md` | 缩进结构大纲 + 重复结构→组件候选 | 决定怎么拆组件，先读它 |
-| `tokens.css` | 颜色/字体 token（按出现频次） | 映射到项目既有的 token/变量 |
-| `report.md` | 屏清单 + 告警统计 + DDS 缺口清单 | 先读一遍，告警就是「这里还得你补」 |
-| `assets/` | 已下载到本地的切图 + `manifest.json` | 拷进项目静态目录，**不要引用蓝湖 CDN 地址** |
-
-**单位默认是设计稿 px（750 基准）**。蓝湖原型按 750 宽设计，产物里的 `750px / 352px / 28px` 就是设计稿上量到的数值，**不要自己除以 2**。移动端项目普遍在构建期用 `postcss-px-to-rem`（750 稿 + `rootValue: 75`）或 `lib-flexible` 把 px 换算成 rem，所以代码里写设计稿 px 就是对的。
-
-项目是 1x（375 逻辑宽）或者不走 px→rem 时，加 `--unit css`，全部数值自动折半成 CSS px。
-
-`--no-ref` 跳过参考图下载，`--no-assets` 跳过切图。离线场景：先把 `dds.raw.json` 存下来，之后用
-`local --dds dds.raw.json --meta meta.json --ref reference.png --out ...` 重跑，不再需要网络。
-
-## 4. 谁说了算
-
-还原时按这个优先级裁决冲突，不要凭感觉：
-
-1. **`screen-N.png`（设计稿裁图）** > 一切。**图标形态、描边细节**只信它（阴影/渐变/圆角 DDS 有，冲突时以裁图为准）。
-2. **`ir.json` 的 `rect`** > `html` 的视觉位置。几何误差 > 1px 就是错。
-3. **`ir.json` 的 `css.color`** > 你的直觉。DDS 缺 color 时脚本会回落到 `--color-text-primary`，并在 `report.md` 的 `text-color-missing` 里点名——这些必须对着裁图逐个确认。
-4. **`tokens.css`** 只是候选值，项目里有自己的 token 就用项目的。
-5. 你从裁图上「看出来」的间距，与 `rect` 冲突时，以 `rect` 为准，把差值记到验收报告里。
-
-## 5. 先读项目，再写代码（不可跳过）
-
-**这一步决定了产出是「能合并的代码」还是「一个孤立的 Demo」。**
-
-**第 0 步，先跑自检**：
-
-```bash
-node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs doctor
-```
-
-它会告诉你三件事：**该用哪个 `--unit`**（读 `designWidth` / `rootValue` 推出来的，不用猜）、**识别到了哪些内网包**、**`project-rules.md` 还空着几项**。
-
-- 输出 `ready: true` → 直接开工。
-- 有 `未接入` 或一堆空格 → 先补 `project-rules.md`（`doctor --init` 生成模板）。**不要拿模板里的示例当项目规范**，那些 `@company/ui`、`UiButton` 是占位，照着写就是编。
-
-**UI 规范接入的三步（doctor 已经带运行时检测，`ui` 字段就是它的结论）**：
-
-| `ui` 字段 | 含义 | 你该做什么 |
-|---|---|---|
-| `present: false` | 没有 `ui-library.md` | 跑 `doctor --ui` 扫 `node_modules` 生成 |
-| `usable: true` | 有清单、组件和人话都够用 | 直接用，出码前先在这张表里查 |
-| `usable: false` + `askUser` | 生成不出可用内容（库没装 / 只发 dist / 没有 `.d.ts`） | **停下来向用户要**：包名+版本、常用组件清单、一段真实用法示例、或内部文档链接；拿到后按模板补全这张表 |
-
-`ui.askUser` 里已经写好了该问什么，直接照它问，别自己另编一套。**任何情况下都不要凭包名猜组件 API**——`<Button>` 有 `type` 还是 `variant`、有没有 `block`，只有源码或用户知道。
-
-然后按顺序找项目自己的规矩，读到什么就遵守什么：
-
-1. 根目录 `AGENTS.md` / `CLAUDE.md` / `.cursor/rules` / `README` 里的开发约定
-2. `.agents/` 下的笔记与规范（`.agents/notes/`、`.agents/skills/`）
-3. 组件库与样式方案：**先读 `.agents/skills/lanhu-dds-codegen/ui-library.md`**（真实组件清单，比文档新）；表里 props 是空的那几个，去 `node_modules/<包>/**/index.d.ts` 或 `.vue` 文件里看真实签名，仍然读不出就问用户。再看 `src/components/`、`tailwind.config.*`、`*.module.css`、`theme.ts`、`variables.scss`
-4. **同类页面的既有实现**（最重要）：找一个已经在线上、结构和本屏接近的页面，读它的取数、样式组织、埋点、路由注册方式
-5. `package.json`：框架、UI 库、CSS 方案、路径别名、lint 规则
-6. **构建配置里的单位基准**（决定产物单位对不对）：
-   - Taro：`config/index.ts` 或根目录 `config.ts` 的 `designWidth`（750 → 产物直接用默认 `--unit design`；375 → 加 `--unit css`）与 `deviceRatio`
-   - Vite/webpack：`postcss.config.*` 里 `postcss-px-to-rem` 的 `rootValue`（75 → `design`；37.5 → `css`）、`postcss-px-to-viewport` 的 `viewportWidth`
-
-如果项目根目录有 `.agents/skills/lanhu-dds-codegen/project-rules.md`，**它优先级高于本文档**——那是这个项目沉淀的还原约定（组件放哪、样式怎么写、token 叫什么、要不要接入设计系统）。没有就按本文档走，并在本次任务结束时把新增的约定补进去。
-
-产出必须落到项目的既有结构里：同样的目录、同样的命名、同样的 import 别名、同样的样式方案。**禁止**为了省事新建一套并行的目录或引入新依赖。
-
-## 6. 出码
-
-### 6.1 结构映射
-
-- **`outline.md` 的「组件候选」就是组件边界**：重复 N 次且结构同构的块 → 抽成一个组件，可变部分（文案、金额、状态、图片）做成 props。重复 5 次的订单卡片写成 5 段复制粘贴是错的。
-- `ir.json` 里 `display:flex` 的节点按 flex 语义还原（`flexDirection`/`justifyContent`/`alignItems`）；**不要**把 abs 参考渲染的 `position:absolute; left; top` 直接搬进项目代码。abs 只用于对齐校验。
-- 尺寸定值来自 `rect`，但**能用 padding/gap 表达的间距就不要写死 margin**。DDS 的父子同 rect 会变成「双倍 padding」，写代码时按视觉裁图确认一次真实内边距。
-- **UI 组件优先，不要手写**。目标是 H5，项目里有一套内网 Vant 封装（也可能有原生 HTML 封装的通用组件）。顺序永远是：**内网组件库有 → 直接用；库能配出来 → 用库的 props/CSS 变量配；都没有 → 才手写**。手写按钮、单元格、标签、空态、骨架屏基本都是错的产出。
-  - 先摸清库里有什么：`package.json` 里的内网包名 → `node_modules/<包>/es/` 或组件文档 → 拿到组件名与 props。常见的 `Button / Cell / CellGroup / Tag / Popup / Dialog / Toast / List / Empty / Skeleton / Tabs / Picker` 一定要查过再动手。
-  - 库组件的默认样式跟设计稿不会一样（内边距、字号、圆角、行高）。**用库暴露的 CSS 变量或 `:deep()` 局部覆盖**，不要全局 `!important`、不要改 `node_modules`。
-- **标签按目标平台来**：这套是 **Taro H5**，写普通 HTML/Vue SFC —— `div/span/img/ul/li/a/button` 都合法。`<view>/<text>/<image>` 是给小程序端的，**这里不用**（会跟内网 UI 库的样式重置打架）。
-- `uiType` 含 `Image`/`Text`/`ImageText` 可作提示：`ImageText` 通常是「图标/图片 + 文案」的一行，优先找库里的 Cell / Media 类组件。
-- 可点击区域用库的 Button 或 `<a>`/`<button>`，语义与可访问性一起给（内网组件库多半已经处理过）。
-
-### 6.2 样式规矩
-
-- 颜色/字号/圆角先查项目 token，命中就用变量；没命中才用 `tokens.css` 的字面值，并在验收里标注「新增 token」。
-- 字体：`tokens.css` 已把字体家族转成 `--font-*` 变量并对 Windows 做了雅黑兜底。不要直接写 `PingFang SC`。
-- 单行文本垂直居中用 flex（`display:flex;align-items:center`），不要靠 `line-height` 猜。
-- 单位直接写**设计稿 px**（750 基准），交给项目内 px→rem 换算；**不要手算 rem/vw**，也不要自己除 2。项目是 1x 或产物用了 `--unit css` 时，值已经是 CSS px。
-- **Taro 项目（`designWidth: 750`）**：样式里就写设计稿量到的 px，Taro 的 `pxtransform` 在构建期统一换算成适配单位（H5 端转 rem）。**不要写 `rpx`、不要写 `rem`、不要手算**——这正是产物默认 `--unit design` 的原因。`designWidth` 是别的值（如 375）时才需要 `--unit css`。
-- 内网 UI 组件库自带一套间距/字号刻度，和设计稿会有 2–4px 的偏差。**允许这层偏差**：能用库的默认值就用默认值，不要为了 1px 去覆盖库样式——那样维护成本远大于收益，评审也会问「为什么这里特殊」。
-
-### 6.3 状态与交互
-
-DDS 没有交互态。以下必须主动补齐并在交付说明里写清楚：
-
-- 空态、加载态、错误态、无网络
-- 按压/禁用/选中态的颜色
-- 长文本截断、金额超长、图片加载失败
-- 点击去向（回蓝湖原型确认，不要自己编）
-
-### 6.4 图标：做占位，不还原
-
-图标是**唯一允许留空的东西**。DDS 只给切图 PNG（无矢量、无语义名），硬描一遍 SVG 既慢又容易走形——这不是模型该干的活。
-
-规矩：
-
-1. **结构写全**：占位元素要有真实尺寸、定位、`border-radius`、`background-size`，从 `rects.json` 取数，保证布局和间距是对的。
-2. **语义留位**：类名 / `data-icon` 写成可识别的语义（`icon-arrow-left`、`icon-search`、`icon-status-paid`），别叫 `img-13`。
-3. **可访问性不断**：功能性图标保留 `aria-label`（关闭、返回、搜索），纯装饰图标 `aria-hidden="true"`。
-4. **别留裸 `<img>` 指向蓝湖**：要么用 `assets/` 的本地切图临时顶上，要么留一个可见的空占位（如 `background: #eee` 的方块），**不能 404**。
-5. **进待办清单**：交付说明里逐条写「第 X 处 → 语义 → 建议换成图标库的哪个」。
-6. 项目本来就有图标库/设计系统时，**能直接换的就别留占位**——占位是给「没有对应图标」的兜底，不是偷懒借口。
-7. **只对「图标」放宽，不对「内容图」放宽**：商品图、banner 背景、证书缩略图这类属于内容，必须用 `assets/` 里的真图，不能占位。判断标准是「这张图是不是承载业务信息」。
-
-示例：
-
-```jsx
-// TODO(icon): status-paid → 换成 @acme/icons 的 PaidIcon，尺寸 14
-<span className="icon icon--status-paid" aria-hidden="true" />
-```
-
-```css
-.icon--status-paid { width: 7px; height: 7px; background: currentColor; border-radius: 50%; }
-```
-
-## 7. 验收
-
-### 7.1 几何（可自动）
-
-`rects.json` 是**设计稿 px、屏内相对坐标**。DOM 量出来是 CSS px，所以要乘 `750 / 视口宽` 换回设计 px 再比——这样在 375 手机、750 桌面、任何缩放比下都成立。
-
-```js
-const rects = /* 贴入 screen-N.rects.json 内容 */;
-const K = 750 / document.documentElement.clientWidth;   // 设计稿 750 基准
-const base = document.querySelector('[data-check-root]').getBoundingClientRect(); // 页面根容器
-const bad = rects.filter(e => {
-  const el = document.querySelector(`[data-dds-check="${e.idx}"]`);
-  if (!el) return true;                                  // 找不到 = 直接算失败
-  const r = el.getBoundingClientRect();
-  return Math.abs((r.x - base.x) * K - e.x) > 3
-      || Math.abs((r.y - base.y) * K - e.y) > 3
-      || Math.abs(r.width * K - e.w) > 3
-      || Math.abs(r.height * K - e.h) > 3;
-});
-console.table(bad);
-```
-
-验收要求：**差值 ≤ 3 设计 px（≈1.5 CSS px）视为通过**；超过必须解释原因（字体度量、图标尺寸、内容溢出、换行行数不同）。不想加 `data-dds-check` 属性也没关系，用组件里对应的选择器逐个手查也行，但必须真的量过。
-
-### 7.2 视觉（人工或截图）
-
-把实现页面截成 375 宽整图，和 `screen-N.png` 并排看。重点看 DDS 给不了的两类：**图标形态、字体度量**（字形宽度差会让数字/标题轻微错位，不必强求像素一致，但不能错行、错位到破坏布局）。阴影/渐变 DDS 有，对不上先怀疑自己没按缩放比换算。
-
-### 7.3 交付说明必须写
-
-- 做了哪几屏、对应哪个设计稿链接/版本
-- 抽了哪些组件，各承接什么 props
-- 哪些值是新引入的 token（而不是复用项目现有 token）
-- DDS 缺口是怎么补的（图标占位方案、字体兜底方案）
-- **图标待办清单**：哪些位置是占位、需要人工换成项目图标库的哪个组件
-- 明确的未还原项（如果有）
-
-## 8. DDS 的已知缺口
-
-这些不要试图从 DDS 里挖，挖不到，直接补：
-
-| 缺口 | 表现 | 补法 |
-|---|---|---|
-| （无） | 阴影 DDS **有**：`style.boxShadow`，值形如 `0px 4px 40px 0px rgba(0,0,0,0.13)` | 直接用；脚本已把里面的 px 按缩放比折算（漏了会大一倍） |
-| 响应式 | 只有 375 一套绝对坐标 | 按项目栅格重算，或只做 375 并说明 |
-| 交互态 | 无 | 见 6.3 |
-| **图标** | 只有切图 PNG，没有矢量、没有语义名 | **不要还原**，做占位并写全 CSS，列为待办交人工（见 6.4） |
-| 字重细节 | `fontWeight` 有时缺失或与设计不符 | 看裁图 |
-| 1px 描边 | 可能丢 | 看裁图 |
-
-**阴影和渐变都不是缺口**：`background` 给的是完整可用的 `linear-gradient(...)`，角度色标齐全，渐变文字（`WebkitBackgroundClip:text` + `WebkitTextFillColor:transparent`）也成对给全；`boxShadow` 是合法的 CSS 阴影值。
-两者共同的坑是**单位**：DDS 全是设备像素，阴影的 `0px 4px 40px` 在 @2x 下要变成 `0px 2px 20px`。脚本已处理，你手写时别忘。
-
-`report.md` 里的每条告警都是「DDS 在这里没给准」，逐条处理，不要静默忽略。
-
-## 9. 常见错误（都会导致返工）
-
-1. **不选屏就编译**：把整张画布当一个页面写，出来是个 3750 宽的怪物。
-2. **直接搬 abs 布局**：`screen-N.html` 是校验用的参考，不是交付代码。
-3. **信了 DDS 的 `color`**：文字颜色经常缺失，全部变黑，红价橙状态全丢。
-4. **引用了蓝湖 CDN 图片地址**：会过期，必须用 `assets/` 里的本地文件。
-5. **跳过第 5 步**：产出和项目代码风格格格不入，评审直接打回。
-6. **一次性生成整页巨型组件**：先按 outline 拆，再填内容。
-7. **把污染源当交付**：`.agents/tmp/dump-ir.mjs`、`design/dds/`、根目录 `dump-*.json` 都不该出现。产物和临时脚本都在 `~/.dsh-lanhu-dds/sessions/<会话>/`；项目里只留 `project-rules.md`、`ui-library.md` 和业务代码。
-8. **凭包名猜 UI 组件 API**：`ui-library.md` 里 props 是空的就停下问用户要（或读源码），不要按 Vant 的名字硬套内网库。
-9. **把 `&nbsp;` 当真文本**：DDS 的文案里有 HTML 实体，脚本已经解码过，别再手动转一次。
-
-## 10. 两种运行方式（等价）
-
-| | 纯 Skill | Skill + `dsh-lanhu-dds` 插件 |
-|---|---|---|
-| 怎么跑 | 用 bash 执行本目录 `scripts/lanhu-dds.mjs` | 直接调 `lanhu_dds_screens` / `lanhu_dds_build` / `lanhu_dds_doctor` 工具 |
-| 产物 | 完全一致 | 完全一致 |
-| Cookie | 同左（`--cookie` 一次，存进 `~/.dsh/lanhu-cookie`） | 读 `~/.dsh/lanhu-cookie`；没有就要、验证后写回 |
-| 依赖 | Node ≥18 | 同左（插件本身零依赖） |
-
-**只装 Skill 就能完成全部还原**，插件只是省掉「拼命令行 + 手动传 Cookie」这两步。
-唯一必须用插件的场景：模型所在环境**不能执行 shell 命令**（没有 bash/node 工具），那时只能靠插件提供的原生工具。
-
-## 11. 没有 python / 没有浏览器也能跑
-
-脚本零依赖，纯 Node（≥18）。**不需要** Python、不需要 Playwright、不需要 pip 装任何东西。
-`lanhu-dds.mjs` 自带 PNG 裁剪，参考图裁切也能在纯 Node 里完成。
-
-若环境里装了 lanhu-mcp，可以用它的视觉工具做二次确认（`lanhu_inspect_design_region` 看局部特写），
-但**不要**用它的 `dds_layout_suggestions` 代替本流程的 DDS 树——那份是被拍平成扁平 CSS 的，丢了包装节点和层级。
+| 调用方式 | `node .agents/skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs ...` | 直接调 `lanhu_dds_doctor` / `lanhu_dds_screens` / `lanhu_dds_build` |
+| Cookie 与产物 | `~/.dsh-lanhu-dds/cookie`；`~/.dsh-lanhu-dds/sessions/<会话>/` | 完全相同 |
+| 运行环境 | 纯 Node ≥ 18（内置 PNG 裁剪与 `alipic` 镜像回退，无需 Python / Playwright / lanhu-mcp） | 完全相同 |
