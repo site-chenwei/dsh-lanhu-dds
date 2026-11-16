@@ -127,10 +127,17 @@ export async function resolveImage({ projectId, imageId, teamId, cookie }) {
 
 /** 取 DDS 布局树。只要 Cookie，不需要 Authorization，也不需要浏览器。 */
 export async function fetchDds({ versionId, cookie }) {
-  if (!cookie) throw new Error('拉取 DDS 需要蓝湖 Cookie：设置环境变量 LANHU_COOKIE，或传 --cookie。')
+  if (!cookie) {
+    throw new Error(
+      '拉取 DDS 需要蓝湖 Cookie。给法：--cookie "<值>" / 环境变量 LANHU_COOKIE / ~/.dsh/.env 或当前目录 .env 里的 LANHU_COOKIE=... / ~/.lanhu-cookie。' +
+        '拿法：浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头。'
+    )
+  }
   const meta = await getJson(`${DDS}/api/dds/image/store_schema_revise?version_id=${encodeURIComponent(versionId)}`, cookie, `${DDS}/`)
   if (String(meta.code ?? '') !== '00000') {
-    throw new Error(`DDS 接口返回 code=${meta.code} ${meta.message ?? ''}（Cookie 过期或无权访问）`)
+    throw new Error(
+      `DDS 接口返回 code=${meta.code} ${meta.message ?? ''}（Cookie 过期，或当前账号没有该设计图权限；重新取一份 Cookie 再来）`
+    )
   }
   const url = meta.data?.data_resource_url
   if (!url) throw new Error(`DDS 接口没有 data_resource_url：${JSON.stringify(meta).slice(0, 300)}`)

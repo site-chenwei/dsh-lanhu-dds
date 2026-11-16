@@ -109,7 +109,22 @@ plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds" })
     cookie: !!js process.env.LANHU_COOKIE
 ```
 
-Cookie 过期表现为 DDS 接口返回 `code: "10089"`（登录权限校验失败），工具会返回 `missing-cookie` 或原始错误，不会静默降级。
+没有 Cookie 时工具不会静默降级，而是返回一份可以直接照着问用户的载荷：
+
+```json
+{
+  "ok": false,
+  "error": "missing-cookie",
+  "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie。",
+  "howToGet": "浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头",
+  "howToGive": ["在对话里贴一次", "或写进 ~/.dsh/.env", "或写进 ~/.lanhu-cookie"],
+  "searched": ["config.cookie", "环境变量 LANHU_COOKIE", "~/.dsh/.env", "<cwd>/.env", "~/.lanhu-cookie"]
+}
+```
+
+`searched` 是它**真的查过**的绝对路径——用户说「我配过了」时，对着这个列表就能看出配错了目录还是变量名写错。
+
+Cookie 过期或账号无权限时返回 `error: "cookie-expired"`（识别 `code 10089` 与 `HTTP 418 permission to access this project`），提示换成重新取 Cookie 而不是反复重试。配好之后重跑同一个工具即可，不用重启。
 
 ## 为什么不用 lanhu-mcp
 

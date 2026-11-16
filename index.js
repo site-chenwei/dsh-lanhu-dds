@@ -56,9 +56,47 @@ export function resolveCookie(config) {
 
 // ---------------------------------------------------------------- 工具定义
 
-const COOKIE_HINT =
-  '未找到蓝湖 Cookie。在蓝湖网页登录后按 F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头，' +
-  '然后设置环境变量 LANHU_COOKIE，或写入 ~/.lanhu-cookie。'
+const HOW_TO_GET =
+  '浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头（一整行，通常含 SESSION 等键）'
+
+const HOW_TO_GIVE = [
+  '在对话里贴一次（只在本次会话用，不落盘不提交）',
+  '或写进 ~/.dsh/.env：LANHU_COOKIE=<整行 cookie>',
+  '或写进 ~/.lanhu-cookie：整行 cookie',
+]
+
+const SECURITY =
+  'Cookie 等同登录态：不要写进代码、不要提交到仓库、不要在回复里回显（贴进来会自动打码，但别再抄出去）'
+
+/** 把「cookie 缺失/过期」做成一份可以直接照着问用户的载荷，而不是一句错误字符串。 */
+function cookiePayload(kind, detail) {
+  const home = process.env.DSH_HOME || join(homedir(), '.dsh')
+  const searched = [
+    'config.cookie（profile 的 cordis.patch.yml）',
+    '环境变量 LANHU_COOKIE',
+    `${join(home, '.env')} 里的 LANHU_COOKIE=...`,
+    `${join(process.cwd(), '.env')} 里的 LANHU_COOKIE=...`,
+    `${join(homedir(), '.lanhu-cookie')}（整份 cookie 一行）`,
+  ]
+  const out = {
+    ok: false,
+    error: kind,
+    askUser:
+      kind === 'cookie-expired'
+        ? '认证被拒绝，用旧 Cookie 反复重试没用。把下面这段话和获取方法一起发给用户，等新 Cookie 再来。'
+        : '停在这里，向用户要 Cookie。不要猜、不要伪造、不要绕过 Cookie 直接凭想象编页面结构和样式。',
+    say: kind === 'cookie-expired'
+      ? '蓝湖拒绝访问：Cookie 过期，或当前账号没有这个项目的权限。请确认登录的账号，并重新给一份 Cookie。'
+      : '这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie。',
+    howToGet: HOW_TO_GET,
+    howToGive: HOW_TO_GIVE,
+    afterFill: '配好后重新调用本工具即可，不需要重启。',
+    security: SECURITY,
+  }
+  if (detail) out.detail = detail
+  if (kind !== 'cookie-expired') out.searched = searched
+  return out
+}
 
 const SCREENS_PARAMS = {
   type: 'object',
@@ -113,7 +151,11 @@ function renderJson(_args, value) {
 }
 
 function describeError(error, hint) {
-  const out = { ok: false, error: String(error?.message ?? error) }
+  const msg = String(error?.message ?? error)
+  if (/10089|登录权限|permission to access this project|Cookie 过期|未登录|HTTP 40[13]|HTTP 418/i.test(msg)) {
+    return cookiePayload('cookie-expired', msg)
+  }
+  const out = { ok: false, error: msg }
   if (hint) out.hint = hint
   return out
 }
@@ -124,12 +166,12 @@ export function createScreensTool(getConfig) {
     description:
       '列出蓝湖设计图里包含的所有手机屏（一张设计图通常横排多台手机屏）。' +
       '返回每屏的序号、尺寸、节点数、是否整图（raster）、导航栏标题与首屏文案。' +
-      '照设计稿写代码前先调用它选屏，不要跳过。',
+      '照设计稿写代码前先调用它选屏，不要跳过。缺 Cookie 时返回 missing-cookie 与获取方法——此时停下来问用户，不要自行编造。',
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
       const { value: cookie } = resolveCookie(getConfig())
-      if (!cookie) return { ok: false, error: 'missing-cookie', hint: COOKIE_HINT }
+      if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({ url: args.url, cookie, list: true })
         return { ok: true, name: r.name, canvas: r.canvas, scale: r.scale, screens: r.screens }
@@ -193,7 +235,7 @@ export function createBuildTool(getConfig) {
     async execute(args) {
       const config = getConfig()
       const { value: cookie, from } = resolveCookie(config)
-      if (!cookie) return { ok: false, error: 'missing-cookie', hint: COOKIE_HINT }
+      if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({
           url: args.url,
