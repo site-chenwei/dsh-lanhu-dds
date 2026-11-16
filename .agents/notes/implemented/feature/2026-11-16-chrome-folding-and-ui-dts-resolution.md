@@ -16,10 +16,10 @@ Status: implemented
 编译器（`lib/lanhu-dds.mjs`）与技能规范（`skills/lanhu-dds-codegen/SKILL.md`）协同收紧壳层边界、资产提取与组件库元数据契约：
 
 1. **默认忽略顶导壳层并强制底栏安全区适配**：新增 `detectScreenChrome`，识别贴顶状态栏/标准导航栏（折叠为 `# [顶部导航壳层 默认忽略]` 注释并向首块实际内容输出 `↑nav:<px>`）与贴底设备安全区指示条（折叠为 `# [底部安全区占位 ... 默认忽略切图]` 并跳过切图下载）。`SKILL.md` 将「默认忽略蓝湖顶部导航栏，仅关心实际内容区域与底栏安全区域高度适配（不因旧代码漏写而省掉或回退）」设为最高优视觉边界。
-2. **统一提取 `background` / `backgroundImage` 切图与渐变**：新增 `extractCssUrl` 同时解析并重写 `css.background` 与 `css.backgroundImage` 中的远程图片 URL，对真实高度超容器 `1.35×` 且贴近屏底的切图追加画布截断长图提示；`specMarkdown` 补齐 `linear-gradient(...)` 输出、清洗 `rgba(..., 1.000000)` 浮点尾数与 alpha `< 0.001` 的全透明无效边框、折叠组合图标内部碎片并为小图标标注邻近短文本 `near:"..."`。
-3. **去壳层同路由变体配对与精简构建返回**：`buildVariantsDiff` 先剥离顶底壳层节点，再仅对同导航标题的全屏页或同页底部弹层计算差异；`buildDesign` 返回值仅保留当前请求屏摘要，不再重复回传全画布 `screens` 列表。
-4. **精确匹配组件独立 `.d.ts` 并补齐插槽、`v-model` 与 CSS 变量**：`resolveModuleTarget` 支持剥离 `.vue/.tsx/.jsx` 后缀映射到同目录 `.d.ts`，`collectBarrelExports` 支持 `import + export { ... }` 两段转发与包内组件名索引兜底，`fileMatchesComponent` 阻断跨组件兜底串台；新增 `extractSlotsFromText`、`extractVModelsFromText`、`collectPkgCssVars` 提取插槽、`v-model` 与 `--<prefix>-*` 变量；图标清单按每行 12 个折行，无独立 `.d.ts` 的透传重导出组件折叠为紧凑列表。
-5. **前置一次性三合一拍板与过检即停硬闸**：`SKILL.md` 要求开工唯一一次 `ask_user_question` 同时拍板「重构/优化模式 + 屏到页面映射 + 旧页面独有业务开关去留」，单页静态检查通过即封板，全部目标页过检且 `strays` 为空后立即收尾，纯视图层还原默认不立 `.agents/notes/` 笔记。
+2. **统一提取 `background` / `backgroundImage` 切图与渐变，并清洗空白切图与弹层垫底图**：新增 `extractCssUrl` 同时解析并重写 `css.background` 与 `css.backgroundImage` 中的远程图片 URL，对真实高度宽高比超容器 `1.25×` 的切图追加画布截断长图提示；通过 `isBlankIconPng` 解码小尺寸 PNG 识别全透明或纯白占位块并标注 `[空白占位切图，勿渲染]`，对底部半屏弹层根节点 `box-0` 的整屏背景标注 `[弹层底层页面预览背景，勿当弹层内容渲染]`，并在 `spec.md` 顶部输出过滤后的「本屏业务切图」清单；`specMarkdown` 补齐 `linear-gradient(...)` 输出、清洗 `rgba(..., 1.000000)` 与 `100.000000%` 浮点尾数、剥离全透明无效边框、剪除纯空叶子 `box`、去重重叠安全区注释、标注跨出窄父容器的全宽悬浮层，并为小尺寸图标节点标注邻近短文本 `near:"..."`。
+3. **去壳层同路由变体配对与精简构建返回**：`buildVariantsDiff` 先剥离顶底壳层节点，文本节点以去字号微调漂移的 `(lanhutext, x, text)` 生成签名，对同导航标题的全屏页（如 26px 与 28px 字号微调的现金/兑换详情页）或同页底部弹层稳定配对；`buildDesign` 返回值仅保留当前请求屏摘要，不再重复回传全画布 `screens` 列表。
+4. **精确匹配组件独立 `.d.ts` 并补齐插槽、`v-model`、`var(--*)` 消费与 BEM 子类名**：`resolveModuleTarget` 支持剥离 `.vue/.tsx/.jsx` 后缀映射到同目录 `.d.ts`，`collectBarrelExports` 支持 `import + export { ... }` 两段转发与包内组件名索引兜底，`fileMatchesComponent` 阻断跨组件兜底串台；提取插槽、`v-model`、CSS 文件中的 `--name:` 声明与 `var(--name)` 消费以及 `.block__elem` BEM 子类名，同时仅向具备本包源文件的组件挂载变量与子类名（防止覆写底层库的 `--van-*` 污染无 `.d.ts` 的透传重导出组件，并阻断短前缀组件抢占兄弟组件变量）；图标清单按每行 12 个折行。
+5. **前置正交拍板、单页上下文隔离与过检即停硬闸**：`SKILL.md` 要求在调 `lanhu_dds_build` 前先弹唯一一次 `ask_user_question`（多选项必须原子正交、纳入与排除屏分列），随后仅按需编译纳入屏号；强制单页上下文隔离（写第 $k$ 页前禁预读后续页 `spec.md` 撑爆上下文触发压缩重读），仅跑目标文件单点静态检查（禁无故跑全量 `taro/vite build`），全部目标页过检且 `strays` 为空后立即收尾。
 
 ## Artifacts and contracts
 
