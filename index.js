@@ -10,8 +10,17 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
-import { buildDesign, diagnoseProject, initProjectRules, inspectUiLibrary, writeUiLibraryDoc } from './lib/lanhu-dds.mjs'
+import {
+  buildDesign,
+  diagnoseProject,
+  initProjectRules,
+  inspectUiLibrary,
+  writeUiLibraryDoc,
+  COOKIE_FILE,
+  readCookie,
+  saveCookie,
+  forgetCookie,
+} from './lib/lanhu-dds.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SKILL_DIR = join(HERE, 'skills', 'lanhu-dds-codegen')
@@ -20,54 +29,37 @@ export const name = 'dsh-lanhu-dds'
 export const inject = ['tools', 'skills']
 
 // ---------------------------------------------------------------- Cookie
+//
+// 唯一存放位置：lib 里的 COOKIE_FILE，默认 ~/.dsh/lanhu-cookie（0600）。
+// 没有就向用户要；拿到后先真读一次设计图验证，通过才落盘；之后所有会话直接复用。
+// 不读环境变量、不读 .env、不读 config —— 只有一个位置，配没配、有没有过期，看这个文件就知道。
 
-/**
- * 凭据解析优先级：显式 config → 环境变量 → harness home 的 .env → 家目录单独文件。
- * 不写死在配置里，配置文件会被提交。
- */
-// 唯一来源：用户在对话里给出、由模型作为参数传进来的值。
-// 不读环境变量、不读配置文件——少一条查找链就少一类「我明明配了却不生效」的故障。
-// 进程内只记住最近一次用户给出的同一个值，供同一轮任务后续调用复用；不落盘，进程结束即消失。
-let userCookie = ''
-
-export function takeCookie(args) {
-  const given = typeof args?.cookie === 'string' ? args.cookie.trim() : ''
-  if (given) {
-    userCookie = given
-    return { value: given, from: '本次对话' }
-  }
-  if (userCookie) return { value: userCookie, from: '本次对话（复用上一次的）' }
-  return { value: '', from: '' }
-}
-
-export function resetCookie() {
-  userCookie = ''
-}
+export { COOKIE_FILE, readCookie, saveCookie, forgetCookie }
 
 const HOW_TO_GET =
   '浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头（一整行，通常含 SESSION 等键）'
 
-const HOW_TO_GIVE = ['直接在对话里贴给我，我作为参数传给工具；只在本次会话内复用，不落盘、不写环境变量、不改配置']
-
 const SECURITY =
-  'Cookie 等同登录态：不要写进代码、不要提交到仓库、不要在回复里回显（贴进来会自动打码，但别再抄出去）'
+  `Cookie 等同登录态：不要写进代码、不要提交到仓库、不要在回复里回显。它只会被存到 ${COOKIE_FILE}（权限 0600）`
 
 /** 缺 Cookie / Cookie 被拒时返回一份可以直接转述给用户的载荷，而不是一句错误字符串。 */
 function cookiePayload(kind, detail) {
   const out = {
     ok: false,
     error: kind,
+    cookieFile: COOKIE_FILE,
     askUser:
       kind === 'cookie-expired'
-        ? '认证被拒绝，拿旧 Cookie 反复重试没用。把这段话说给用户，等他给新的。'
+        ? `已存的 Cookie（${COOKIE_FILE}）被拒绝了，重试没用。把下面这段话说给用户，拿到新的我验证后覆盖它。`
         : '停在这里向用户要 Cookie。不要猜、不要伪造、不要绕过它去凭想象编页面结构和样式。',
     say:
       kind === 'cookie-expired'
-        ? '蓝湖拒绝访问：Cookie 过期，或当前账号没有这个项目的权限。请确认登录的账号，并重新给我一份 Cookie。'
+        ? '蓝湖拒绝访问：Cookie 过期，或当前账号没有这个项目的权限。请确认登录的账号，重新给我一份 Cookie。'
         : '这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。',
     howToGet: HOW_TO_GET,
-    howToGive: HOW_TO_GIVE,
-    afterFill: '把 Cookie 贴过来之后我直接重跑，不需要重启、不用改任何配置。',
+    howToGive: [`直接在对话里贴给我，我验证通过后会存到 ${COOKIE_FILE}（0600），以后所有会话都不必再贴`],
+    whatHappensNext: `收到后我先用一个真实设计图验证能不能读，通过就存到 ${COOKIE_FILE}（0600），以后所有会话都不用再贴；不通过我会告诉你，绝不存坏值。`,
+    afterFill: '以后只要这个文件还在就直接用；换号或过期时重贴一次，自动覆盖。',
     security: SECURITY,
   }
   if (detail) out.detail = detail
@@ -155,11 +147,20 @@ export function createScreensTool() {
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
-      const { value: cookie } = takeCookie(args)
+      const given = typeof args.cookie === 'string' ? args.cookie.trim() : ''
+      const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({ url: args.url, cookie, list: true })
-        return { ok: true, name: r.name, canvas: r.canvas, scale: r.scale, screens: r.screens }
+        const saved = given ? saveCookie(given) : null
+        return {
+          ok: true,
+          name: r.name,
+          canvas: r.canvas,
+          scale: r.scale,
+          screens: r.screens,
+          ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
+        }
       } catch (error) {
         return describeError(error, '检查链接是否指向设计图（不是 PRD），以及 Cookie 是否过期。')
       }
@@ -174,6 +175,7 @@ const DOCTOR_PARAMS = {
     init: { type: 'boolean', description: '生成 project-rules.md 接入模板（已存在不覆盖）。' },
     ui: { type: 'boolean', description: '扫内网 UI 库，把真实组件清单写到 .agents/skills/lanhu-dds-codegen/ui-library.md。' },
     pkg: { type: 'string', description: '内网 UI 库包名；不填则用 doctor 自动识别的第一个。' },
+    forget: { type: 'boolean', description: '删除已保存的蓝湖 Cookie（换号或排查 Cookie 问题时用）。' },
   },
 }
 
@@ -188,6 +190,7 @@ export function createDoctorTool() {
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
       const dir = args.project ?? process.cwd()
+      if (args.forget) return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
       if (args.init) {
         const r = initProjectRules(dir)
         return r.ok ? { ok: true, ...r, hint: '把真实技术栈/目录/token/组件库填进去，填完再跑一次本工具直到 ready:true' } : { ok: false, ...r }
@@ -218,7 +221,8 @@ export function createBuildTool() {
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args) {
-      const { value: cookie, from } = takeCookie(args)
+      const given = typeof args.cookie === 'string' ? args.cookie.trim() : ''
+      const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
       try {
         const r = await buildDesign({
@@ -232,7 +236,13 @@ export function createBuildTool() {
           reference: args.reference !== false,
           assets: args.assets !== false,
         })
-        return { ok: true, cookieFrom: from, ...r }
+        const saved = given ? saveCookie(given) : null
+        return {
+          ok: true,
+          cookieFrom: given ? '本次提供（已验证通过）' : COOKIE_FILE,
+          ...r,
+          ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
+        }
       } catch (error) {
         return describeError(error, '检查链接里的 image_id 是否属于当前项目、Cookie 是否过期。')
       }
