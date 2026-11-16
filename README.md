@@ -77,7 +77,7 @@ plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds" })
 
 ## Cookie：一个文件，验证过才写
 
-存在固定位置：**`~/.dsh/lanhu-cookie`**（取 `$DSH_HOME/lanhu-cookie`，权限 0600）。工具每次读它，不读环境变量、不读 `.env`、不读配置——只有一个位置，有没有、失没失效，看这个文件就知道。
+存在固定位置：**`~/.dsh-lanhu-dds/cookie`**（`DSH_LANHU_DDS_HOME` 可改根目录，权限 0600）。工具每次读它，不读环境变量、不读 `.env`、不读配置——只有一个位置，有没有、失没失效，看这个文件就知道。
 
 ```bash
 # 第一次：工具说 missing-cookie，把 say 转给用户
@@ -95,7 +95,7 @@ lanhu_dds_doctor({ forget: true })
 {
   "ok": false,
   "error": "missing-cookie",
-  "cookieFile": "/Users/you/.dsh/lanhu-cookie",
+  "cookieFile": "/Users/you/.dsh-lanhu-dds/cookie",
   "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。",
   "howToGet": "浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头",
   "howToGive": ["直接在对话里贴给我，我验证通过后会存到 ~/.dsh/lanhu-cookie（0600），以后所有会话都不必再贴"],
@@ -107,20 +107,32 @@ lanhu_dds_doctor({ forget: true })
 
 ## 中间产物放哪
 
-固定落 `<工作目录>/.lanhu-dds/<设计图名>-<id8>/`，别自己指定到外面去（`--out` 指到工作区外会被拒绝）。同一页重跑先清空再写，不留上一轮的 `screen-N.*` 残骸。`project-rules.md` 里要把它写进 `.gitignore`——中间产物是可重新生成的证据，不是源码。
+全部落在 **`~/.dsh-lanhu-dds/`**，项目里不留任何东西：
 
 ```
-.lanhu-dds/我的订单-4a3b8460/
-├── screen-0.png          # 从整张画布裁出的设计稿（视觉唯一真相）
-├── screen-0.ir.json      # 结构树：box / 文案 / 颜色 / 字号 / flex 语义
-├── screen-0.rects.json   # 扁平几何表，可直接和 DOM getBoundingClientRect 比对
-├── screen-0.html         # 绝对定位参考渲染（带 data-dds，可截图做像素 diff）
-├── screen-0.outline.md   # 缩进大纲 + 重复结构 → 组件候选
-├── tokens.css            # 颜色/字体 token（含 Windows 雅黑兜底）
-├── report.md             # 屏清单 + DDS 缺口告警
-├── screens.json / meta.json / dds.raw.json / reference.png
-└── assets/               # 切图 + manifest.json（不放蓝湖 CDN 地址）
+~/.dsh-lanhu-dds/
+├── cookie                      # 蓝湖登录态（0600，验证通过才写）
+├── tmp/                        # 临时脚本放这，别放项目里
+└── 我的订单-4a3b8460/           # 一张设计图一个目录，重跑先清空再写
+    ├── screen-0.png
+    ├── screen-0.ir.json
+    ├── ...
 ```
+
+`out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。因为不在项目里，**不需要 gitignore**；反过来说，项目里出现 `.agents/tmp/`、`dump-*.mjs`、`design/dds/` 这类残留就是错的，`lanhu_dds_doctor` 会扫出来报 `strays`。
+
+每屏产物：
+
+| 文件 | 作用 |
+|---|---|
+| `screen-N.png` | 设计稿裁图（视觉唯一真相） |
+| `screen-N.ir.json` | 结构树：box / 文案 / 颜色 / 字号 / flex 语义 |
+| `screen-N.rects.json` | 扁平几何表，可直接和 DOM `getBoundingClientRect` 比对 |
+| `screen-N.html` | 绝对定位参考渲染（带 `data-dds`，可截图做像素 diff） |
+| `screen-N.outline.md` | 缩进大纲 + 重复结构 → 组件候选 |
+| `tokens.css` | 颜色/字体 token（含 Windows 雅黑兜底） |
+| `report.md` | 屏清单 + DDS 缺口告警 |
+| `assets/` | 切图 + `manifest.json`（不放蓝湖 CDN 地址） |
 
 ## 为什么不用 lanhu-mcp
 

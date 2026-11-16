@@ -99,7 +99,7 @@ const BUILD_PARAMS = {
     },
     out: {
       type: 'string',
-      description: '产物目录，必须在会话工作目录内（默认 .lanhu-dds/<设计图名>-<id8>/）。不要指到工作区外。',
+      description: '产物子目录名（只一层，默认 <设计图名>-<id8>）。根目录固定为 ~/.dsh-lanhu-dds，不接受路径与 ..。',
     },
     scale: { type: 'number', description: '强制缩放比（1/2/3）。默认按屏宽自动推断。' },
     unit: {

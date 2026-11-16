@@ -80,15 +80,15 @@ cat vite.config.* tsconfig.json 2>/dev/null | head -60
 
 `lanhu-dds-codegen` 生成的 `tokens.css` 是候选值，**不直接引入项目**，只用来和项目 token 做映射。
 
-## 3.5 中间产物
+## 3.5 中间产物（不进项目）
 
-蓝湖还原的中间产物（裁图 / IR / 几何表 / 参考 HTML / 切图）统一落在 `.lanhu-dds/`，**必须进 `.gitignore`**：
+蓝湖还原的产物（裁图 / IR / 几何表 / 参考 HTML / 切图）和 Cookie 统一在 **`~/.dsh-lanhu-dds/`**，不在项目里，所以**不需要 gitignore 任何东西**。
 
-```
-.lanhu-dds/
-```
+项目里不允许出现：
+- `.agents/tmp/`、`tmp/`、`scratch/` 之类的临时目录
+- `dump-*.mjs`、`probe-*.mjs`、`screen-*.ir.json` 之类的中间文件
 
-它们是可重新生成的证据，不是源码。要交付的只有你在 `src/` 里写的组件。
+需要临时脚本就去 `~/.dsh-lanhu-dds/tmp/`。`lanhu_dds_doctor` 会扫这些残留并报出来。
 
 ## 4. 字体
 
