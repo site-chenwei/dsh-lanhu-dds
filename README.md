@@ -1,5 +1,8 @@
 # dsh-lanhu-dds
 
+[![npm](https://img.shields.io/npm/v/dsh-lanhu-dds.svg)](https://www.npmjs.com/package/dsh-lanhu-dds)
+[![license](https://img.shields.io/npm/l/dsh-lanhu-dds.svg)](LICENSE)
+
 把蓝湖「转代码」(DDS) 接进 DeepSeek Harness：设计图 → 可写代码的产物 → 还原 Skill。
 
 **零依赖**。不需要 lanhu-mcp、不需要 Python、不需要 Playwright、不需要 pip 装 wheel。装一个插件就完事。
@@ -67,27 +70,21 @@ plugin_manager({ action: "install_bundle", target: "<本目录绝对路径>" })
 
 新装的 bundle 能通过 HMR 直接生效；**替换已安装的同一包需要重启 DSH**。
 
-### 方式 B：npm（公共源或私域源）
+### 方式 B：npm
 
-```bash
-npm i -g @deepseek-ai/dsh   # 已有可跳过
+```js
 plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds" })
 ```
 
-内网私域源则在 profile 里指定源：
+内网走私域源：先在私域源发布同一份包（`npm publish --registry <私域源>`），再在 profile 的 `cordis.patch.yml` 里指定源：
 
 ```yaml
-# profile 的 cordis.patch.yml
 - id: dsh-plugin-manager
   config:
     registry: https://<私域源>/
 ```
 
-```js
-plugin_manager({ action: "install_bundle", target: "dsh-lanhu-dds@0.1.0" })
-```
-
-注意：**配置进 `registry` 的私有源不会被公共源兜底**，所以内网只用私域源是安全的。
+注意：**配置进 `registry` 的私有源不会被公共源兜底**，内网只用私域源是安全的。
 
 ### 方式 C：完全离线
 
