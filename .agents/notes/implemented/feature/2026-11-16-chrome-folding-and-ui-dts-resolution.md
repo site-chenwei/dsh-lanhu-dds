@@ -13,7 +13,7 @@ Status: implemented
 
 ## Decision
 
-编译器（`lib/lanhu-dds.mjs`）与技能规范（`skills/lanhu-dds-codegen/SKILL.md`）协同收紧壳层边界、资产提取与组件库元数据契约：
+编译器（`lib/` 下的 `spec.mjs`、`assets.mjs`、`variants.mjs`、`ui-library.mjs`）与技能规范（`skills/lanhu-dds-codegen/SKILL.md`）协同收紧壳层边界、资产提取与组件库元数据契约：
 
 1. **默认忽略顶导壳层并强制底栏安全区适配**：新增 `detectScreenChrome`，识别贴顶状态栏/标准导航栏（折叠为 `# [顶部导航壳层 默认忽略]` 注释并向首块实际内容输出 `↑nav:<px>`）与贴底设备安全区指示条（折叠为 `# [底部安全区占位 ... 默认忽略切图]` 并跳过切图下载）。`SKILL.md` 将「默认忽略蓝湖顶部导航栏，仅关心实际内容区域与底栏安全区域高度适配（不因旧代码漏写而省掉或回退）」设为最高优视觉边界。
 2. **统一提取 `background` / `backgroundImage` 切图与渐变，并清洗空白切图与弹层垫底图**：新增 `extractCssUrl` 同时解析并重写 `css.background` 与 `css.backgroundImage` 中的远程图片 URL，对真实高度宽高比超容器 `1.25×` 的切图追加画布截断长图提示；通过 `isBlankIconPng` 解码小尺寸 PNG 识别全透明或纯白占位块并标注 `[空白占位切图，勿渲染]`，对底部半屏弹层根节点 `box-0` 的整屏背景标注 `[弹层底层页面预览背景，勿当弹层内容渲染]`，并在 `spec.md` 顶部输出过滤后的「本屏业务切图」清单；`specMarkdown` 补齐 `linear-gradient(...)` 输出、清洗 `rgba(..., 1.000000)` 与 `100.000000%` 浮点尾数、剥离全透明无效边框、剪除纯空叶子 `box`、去重重叠安全区注释、标注跨出窄父容器的全宽悬浮层，并为小尺寸图标节点标注邻近短文本 `near:"..."`。
@@ -26,7 +26,7 @@ Status: implemented
 - `screen-N.spec.md` 顶导与底栏安全区标记格式固定为 `# [顶部导航壳层 默认忽略] @(x,y w×h) title:"..."` 与 `# [底部安全区占位 <h>px 默认忽略切图] @(x,y w×h)`；首块实际内容节点携带 `↑nav:<px>`。
 - 含搜索框、多标签切换栏或高度超过 `0.32 × 屏宽` 的自定义复合页头不会被 `detectScreenChrome` 折叠，继续作为常规内容节点输出。
 - `.agents/skills/lanhu-dds-codegen/ui-library.md` 单行长度控制在 500 字符以内；`readUiLibrary` 将折叠的透传组件计入总导出组件数，同时以具备独立类型签名的组件判定 `usable`。
-- `skills/lanhu-dds-codegen/scripts/lanhu-dds.mjs` 保持与 `lib/lanhu-dds.mjs` 逐字节同步。
+- 提问顺序、编译范围与收尾边界现由 `plan` 契约和选屏摘要保证，不再依赖第 5 条里的技能禁令，见 [用 plan 契约、选屏摘要与组件卡片替代技能里的禁令](2026-11-17-plan-contract-and-component-card.md)。
 
 ## Alternatives considered
 

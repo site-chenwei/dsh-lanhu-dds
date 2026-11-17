@@ -12,6 +12,7 @@ import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildDesign } from './lib/build.mjs'
 import { diagnoseProject, initProjectRules, scanAndWriteUiDocs } from './lib/project.mjs'
+import { describeComponents } from './lib/component-card.mjs'
 import { COOKIE_FILE, readCookie, saveCookie, forgetCookie, pruneSessions } from './lib/store.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -81,13 +82,36 @@ const SCREENS_PARAMS = {
 const BUILD_PARAMS = {
   type: 'object',
   additionalProperties: false,
-  required: ['url'],
+  required: ['url', 'plan'],
   properties: {
     cookie: COOKIE_PARAM,
     url: { type: 'string', description: '蓝湖设计图链接。' },
-    screens: {
-      type: 'string',
-      description: '要编译哪几屏：逗号分隔的屏序号（如 "0,2"）或 "all"。默认 "all"；建议先用 lanhu_dds_screens 选屏。',
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['mode', 'pages'],
+      description:
+        '用户拍板的结果，原样填入；会写进 report.md 和每份规格表顶部，之后以规格表里的这一行为准。' +
+        '一个页面的多个状态、变体、弹层屏归到同一个 file 下（参考 lanhu_dds_screens 返回的 pages 分组）。',
+      properties: {
+        mode: { type: 'string', enum: ['rewrite', 'optimize'], description: 'rewrite = 整体重构；optimize = 局部优化。' },
+        pages: {
+          type: 'array',
+          minItems: 1,
+          description: '页面文件 → 屏号。一屏只归一个文件。',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['file', 'screens'],
+            properties: {
+              file: { type: 'string', description: '项目内页面文件路径，如 src/pages/mall/detail/index.vue。' },
+              screens: { type: 'array', minItems: 1, items: { type: 'integer' }, description: '对应的屏序号。' },
+            },
+          },
+        },
+        keep: { type: 'array', items: { type: 'string' }, description: '旧页里设计稿没有、但用户要保留的功能，每项一条。' },
+        drop: { type: 'array', items: { type: 'string' }, description: '旧页里设计稿没有、用户同意移除的功能，每项一条。' },
+      },
     },
     out: {
       type: 'string',
@@ -108,7 +132,7 @@ const BUILD_PARAMS = {
     assets: { type: 'boolean', description: '是否把切图下载到本地 assets/（含像素宽高与组合碎片小图标预裁）。默认 true。' },
     clean: {
       type: 'boolean',
-      description: '是否清空同会话产物目录后全量重建。默认 false（同设计图同单位下增量合并，保留此前已编译的其他屏与 reference.png）。',
+      description: '是否清空同会话产物目录、重新拉取 DDS 与切图。默认 false（复用同设计图版本的缓存）。',
     },
   },
 }
@@ -124,8 +148,18 @@ const OUTPUT_SCHEMA = {
   },
 }
 
+// 返回体是给模型读的：不缩进，省下的字符比可读性值钱
 function renderJson(_args, value) {
-  return [{ type: 'text', text: '```json\n' + JSON.stringify(value, null, 2) + '\n```' }]
+  return [{ type: 'text', text: JSON.stringify(value) }]
+}
+
+/** 组件卡片本身是 Markdown，直接给正文；其余诊断结果仍走 JSON。 */
+function renderDoctor(args, value) {
+  if (!value.cards) return renderJson(args, value)
+  const missing = value.missing?.length
+    ? `\n\n未找到：${value.missing.join('、')}（在 ${value.searched.join('、')} 的编译产物里没有 \`__name\` 等于它的组件；确认名字与 ui-library.md 里一致，或它是底层库透传的组件）`
+    : ''
+  return [{ type: 'text', text: value.cards.join('\n\n') + missing }]
 }
 
 function describeError(error, hint) {
@@ -142,9 +176,10 @@ export function createScreensTool() {
   return {
     name: 'lanhu_dds_screens',
     description:
-      '列出蓝湖设计图里包含的所有手机屏（一张设计图通常横排多台手机屏）。' +
-      '返回每屏的序号、尺寸、节点数、是否整图（raster）、导航栏标题与首屏文案。' +
-      '照设计稿写代码前必须先调用它选屏，随后用 ask_user_question 向用户确认「整体重构 vs 局部优化」与「屏→页面范围映射」后再调 lanhu_dds_build。' +
+      '列出蓝湖设计图里的所有手机屏（一张设计图通常横排多台手机屏）。不落盘、不下载切图。' +
+      '每屏返回序号、尺寸、导航栏标题、是否弹层（popup）与去掉壳层后的全部业务文案（texts）；' +
+      'pages 给出「哪几屏是同一个页面的不同状态/弹层」的分组。' +
+      '这些信息足够对照旧页面、向用户确认模式与「页面文件 → 屏号」映射；确认结果填进 lanhu_dds_build 的 plan。' +
       '缺 Cookie 时返回 missing-cookie 与获取方法——此时停下来问用户，不要自行编造。',
     parameters: SCREENS_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
@@ -158,9 +193,9 @@ export function createScreensTool() {
         return {
           ok: true,
           name: r.name,
-          canvas: r.canvas,
           scale: r.scale,
           screens: r.screens,
+          pages: r.pages,
           ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
         }
       } catch (error) {
@@ -176,7 +211,13 @@ const DOCTOR_PARAMS = {
     project: { type: 'string', description: '项目根目录；省略时自动取当前会话工作目录（无需手传）。' },
     init: { type: 'boolean', description: '生成 project-rules.md 接入模板（已存在不覆盖；若项目已有完备 AGENTS.md 则无需开启）。可与 ui:true 同时传入。' },
     ui: { type: 'boolean', description: '扫内网 UI 库与图标库，把真实组件清单写到 .agents/skills/lanhu-dds-codegen/ui-library.md。可与 init:true 同时传入。' },
-    pkg: { type: 'string', description: '显式指定要扫描的 UI 库包名；不填则自动扫描全部识别到的内网 UI 包与图标包（自动排除工具/SDK 包）。' },
+    component: {
+      type: 'string',
+      description:
+        '查组件卡片：逗号分隔的组件名（如 "XwStepper,XwPageContainer"）。返回每个组件的 props 类型/默认值/说明、事件、插槽、' +
+        '类名与插槽的渲染出现顺序、全部样式规则体（含 CSS 变量回退值）。要用某个组件却拿不准默认值、插槽位置或内部样式时调它，不用翻 node_modules。',
+    },
+    pkg: { type: 'string', description: '显式指定 UI 库包名（配合 ui 或 component）；不填则用自动识别到的全部内网 UI 包（自动排除工具/SDK 包）。' },
     forget: { type: 'boolean', description: '删除已保存的蓝湖 Cookie（换号或排查 Cookie 问题时用）。' },
     prune: { type: 'boolean', description: '清掉超过 days 天没动的会话目录（产物 + 临时脚本），不动 Cookie。' },
     days: { type: 'number', description: 'prune 的天数阈值，默认 7。' },
@@ -200,14 +241,22 @@ export function createDoctorTool(ctx) {
     name: 'lanhu_dds_doctor',
     description:
       '检查项目是否已接入蓝湖 DDS 还原规范：自动定位当前会话工作目录、读出输出单位（design/css）、识别既有 AGENTS.md、' +
-      '区分内网 UI 组件包/图标包与工具包，并支持一键生成 ui-library.md（ui:true）与 project-rules.md（init:true，二者可同传）。',
+      '区分内网 UI 组件包/图标包与工具包，并支持一键生成 ui-library.md（ui:true）与 project-rules.md（init:true，二者可同传）。' +
+      '传 component 时改为返回指定组件的卡片（默认值、插槽位置、样式规则体）。',
     parameters: DOCTOR_PARAMS,
-    output: { schema: OUTPUT_SCHEMA, render: renderJson },
+    output: { schema: OUTPUT_SCHEMA, render: renderDoctor },
     async execute(args, exec) {
       if (args.forget) return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
       if (args.prune) return { ok: true, ...pruneSessions({ days: args.days ?? 7 }), hint: '已清掉超期会话目录；Cookie 不受影响' }
 
       const dir = await resolveProjectDir(ctx, args.project, exec)
+      if (args.component) {
+        const pkgs = args.pkg ? [args.pkg] : diagnoseProject(dir).uiPackages ?? []
+        if (!pkgs.length) return { ok: false, error: '没有识别到内网 UI 包', hint: '用 pkg 参数显式指定包名' }
+        const names = String(args.component).split(',').map((x) => x.trim().replace(/^<|\/?>$/g, '')).filter(Boolean)
+        const { cards, missing } = describeComponents(dir, names, pkgs)
+        return { ok: cards.length > 0, cards, missing, searched: pkgs }
+      }
       const actions = {}
       if (args.init) {
         actions.init = initProjectRules(dir)
@@ -240,9 +289,10 @@ export function createBuildTool() {
   return {
     name: 'lanhu_dds_build',
     description:
-      '把蓝湖设计图的指定屏编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（自动折叠顶部状态栏/导航栏壳层并标注底部安全区占位，含屏内坐标、父相位移、间距、完整背景渐变与样式、切图像素尺寸、组合小图标预裁图与文案，单次 read 即可写代码）、' +
-      '设计稿裁图 screen-N.png、去壳精准配对的多屏变体差异表 variants-diff.md、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图（含 style.background 简写背景图）。' +
-      '同一会话重跑部分 screens 时默认非破坏性增量合并，不会删掉已编译的其他屏与 reference.png。',
+      '按用户拍板的 plan 把蓝湖设计图编译成可直接消费的产物：每屏一份紧凑规格表 screen-N.spec.md（自动折叠顶部状态栏/导航栏壳层并标注底部安全区占位，含屏内坐标、父相位移、间距、完整背景渐变与样式、切图像素尺寸、组合小图标预裁图与文案，单次 read 即可写代码）、' +
+      '设计稿裁图 screen-N.png、同页多屏的变体差异表 variants-diff.md（独有区块 + 同一元素的字号/间距/颜色等属性差）、汇总体检报告 report.md，并自动通过公开 CDN / alipic 内网镜像 / 原图无遮挡裁切三级回退保存本地切图（含 style.background 简写背景图）。' +
+      'plan 必填且来自用户确认：没确认过模式与「页面文件 → 屏号」映射就先去问，不要先编译再问。' +
+      '每次按 plan 全量落盘，产物目录始终与 plan 一致；同会话重跑复用已缓存的 DDS、参考图与切图，不重复下载。',
     parameters: BUILD_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderJson },
     async execute(args, exec) {
@@ -256,7 +306,7 @@ export function createBuildTool() {
           exec,
           session: args.session,
           out: args.out,
-          screens: args.screens ?? 'all',
+          plan: args.plan,
           scale: args.scale,
           unit: args.unit,
           reference: args.reference !== false,
@@ -271,7 +321,9 @@ export function createBuildTool() {
           ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
         }
       } catch (error) {
-        return describeError(error, '检查链接里的 image_id 是否属于当前项目、Cookie 是否过期。')
+        // plan 校验失败的报错自带下一步，不再附加与之无关的链接/Cookie 提示
+        const planError = /^plan 不合法/.test(String(error?.message))
+        return describeError(error, planError ? '' : '检查链接里的 image_id 是否属于当前项目、Cookie 是否过期。')
       }
     },
   }

@@ -1,6 +1,6 @@
 {
   "name": "dsh-lanhu-dds",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Lanhu DDS (design-to-code) tools and skill for DeepSeek Harness: fetch DDS layout trees, compile pixel-accurate screen artifacts, crop reference images — all in zero-dependency Node.",
   "icon": "icon.svg",
   "type": "module",
