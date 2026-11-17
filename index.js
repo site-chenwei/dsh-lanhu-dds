@@ -7,13 +7,14 @@
  * 提供三个工具（lanhu_dds_screens / lanhu_dds_build / lanhu_dds_doctor），并注册 lanhu-dds-codegen skill。
  */
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildDesign } from './lib/build.mjs'
 import { diagnoseProject, initProjectRules, scanAndWriteUiDocs, detectUnitBasis } from './lib/project.mjs'
 import { describeComponents } from './lib/component-card.mjs'
 import { COOKIE_FILE, PLAN_FILE, readCookie, saveCookie, forgetCookie, pruneSessions, sessionDir } from './lib/store.mjs'
+import { UI_DOC_REL } from './lib/ui-library.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SKILL_DIR = join(HERE, 'skills', 'lanhu-dds-codegen')
@@ -322,6 +323,8 @@ export function createBuildTool(ctx) {
       try {
         const projectDir = await resolveProjectDir(ctx, undefined, exec)
         const { designWidth } = detectUnitBasis(projectDir)
+        // 规格表里要不要指路 ui-library.md，取决于这份清单是否已经生成过
+        const uiDoc = existsSync(join(projectDir, UI_DOC_REL))
         const r = await buildDesign({
           url: args.url,
           cookie,
@@ -332,6 +335,7 @@ export function createBuildTool(ctx) {
           scale: args.scale,
           unit: args.unit,
           designWidth,
+          uiDoc,
           reference: args.reference !== false,
           assets: args.assets !== false,
           clean: Boolean(args.clean),
