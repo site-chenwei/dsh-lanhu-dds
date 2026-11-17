@@ -189,7 +189,7 @@ export function describeError(error, hint) {
   // 参数类错误：重试同一份参数没有意义。plan 类除外——它的 error 正文已经写明该去问用户什么，再加一句反而更远
   // 缺 url 是参数问题，不是链接或凭据问题：给一句能直接照做的提示
   if (/^缺少 url$/.test(msg)) {
-    out.hint = '缺少必填参数 url：把用户给的设计图链接整条传进来（含 image_id 的那些查询参数），不要自己拼。'
+    out.hint = '缺少必填参数 url：把用户给的设计图链接整条传进来（含查询参数），不要自己拼。'
     return out
   }
   // plan 的错误自带说明（正文已写清哪一步怎么做），不要再盖一层参数提示

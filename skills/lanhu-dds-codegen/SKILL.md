@@ -6,7 +6,7 @@ whenToUse: 用户给出蓝湖设计图链接要求实现页面或组件；用户
 
 # 蓝湖 DDS 代码还原
 
-DDS（转代码）是蓝湖提供的结构化布局树。插件把它编译成每屏一份规格表 `screen-N.spec.md`（1.3–12KB：层级、屏内坐标、间距、样式、切图清单、文案）和一张裁图 `screen-N.png`，照这两样写代码。全程只用三个工具：`lanhu_dds_doctor`、`lanhu_dds_screens`、`lanhu_dds_build`。
+DDS（转代码）是蓝湖提供的结构化布局树。插件把它编译成每屏一份规格表 `screen-N.spec.md`（1.3–13KB：层级、屏内坐标、间距、样式、切图清单、文案）和一张裁图 `screen-N.png`，照这两样写代码。全程只用三个工具：`lanhu_dds_doctor`、`lanhu_dds_screens`、`lanhu_dds_build`。
 
 ## 流程
 
@@ -92,7 +92,7 @@ lanhu_dds_build({
 
 `img:PLACEHOLDER(尺寸，原因)` 有两种：**切图下载失败**（编译器已依次试过直连、`alipic.lanhuapp.com` 镜像、从原图裁切）和**文字压在背景图上**（图里带着别处的文案，不能直接用）。两种都不用排查网络，按尺寸用 CSS 底色或渐变兜底。
 
-写入项目的只有业务源码、拷入静态目录的图片，以及 `.agents/skills/lanhu-dds-codegen/` 下的接入文件。规格表、JSON、临时脚本留在 `outDir` 或返回的 `tmpDir`；写进项目的会被 `doctor` 报为 `strays`。
+写入项目的只有业务源码、拷入静态目录的图片，以及 `.agents/skills/lanhu-dds-codegen/` 下的接入文件。规格表、JSON、临时脚本留在 `outDir` 或返回的 `tmpDir`；把 `screen-*.spec.md` / `screen-*.ir.json` / `screen-*.rects.json` 这类产物写进项目会被 `doctor` 报为 `strays`（`screen-*.outline.md`、`screen-*.png` 与临时脚本不在检查范围）。
 
 ## 5. 按模式执行
 
