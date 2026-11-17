@@ -43,7 +43,7 @@ Cookie 等同登录态：不写进代码、不提交、不在回复里回显。
 
 `lanhu_dds_screens({ url })` 不落盘、不下载，返回：
 
-- `screens[]`：每屏的 `index`、`title`（导航栏标题）、`texts`（去掉状态栏/导航栏后的全部业务文案）；整屏只有弹层的帧带 `popup: true`（不是每屏都有）。`raster: true` 的屏是整张位图，没有结构，要告诉用户这屏无法结构化还原；`empty: true` 的屏是设计器里的空框（几乎没节点），不要写进 `plan`。
+- `screens[]`：每屏的 `index`、`title`（导航栏标题）、`width`/`height`（与 `lanhu_dds_build` 同一口径：项目 `designWidth` 基准；画布被归一过时返回里带 `div` 与 `designWidth`，别拿画布原始宽自己算）、`texts`（去掉状态栏/导航栏后的全部业务文案）；整屏只有弹层的帧带 `popup: true`（不是每屏都有）。`raster: true` 的屏是整张位图，没有结构，要告诉用户这屏无法结构化还原；`empty: true` 的屏是设计器里的空框（几乎没节点），不要写进 `plan`。
 - `pages[]`：哪几屏是同一个页面的不同状态或弹层，如 `{ title: "产品详情", screens: [3, 5], popups: [4, 6] }`。同组的屏对应同一个页面文件。
 
 接着用 `glob` 找到目标业务目录下的页面文件，读各旧页面的 `<script>` 与模板概览，拿 `texts` 对照，列出旧页面里设计稿没画的业务功能（开关、额外表单项、合规提示条）。这一步用 `texts` 就够，不需要先编译。

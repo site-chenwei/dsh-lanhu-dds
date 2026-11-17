@@ -176,7 +176,7 @@ export function describeError(error, hint) {
     return out
   }
   // 网络抖动、超时、5xx、限流都不是 Cookie 问题：提示成「换 Cookie」会让人白折腾一轮
-  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|JSON 解析|Unexpected token/i.test(msg)) {
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|JSON 解析|Unexpected token|非 JSON/i.test(msg)) {
     // 提示里别再出现「Cookie」：模型看到这个词就会去换 Cookie，而这类失败换什么都没用
     out.hint = '网络或蓝湖服务端的问题：原样重试一次；仍失败就停下来告诉用户并附上 error 原文，不要连着重试第三次。'
     return out
@@ -187,8 +187,13 @@ export function describeError(error, hint) {
     return out
   }
   // 参数类错误：重试同一份参数没有意义。plan 类除外——它的 error 正文已经写明该去问用户什么，再加一句反而更远
-  // 「缺少 url」例外：这类确实是链接本身的问题，交给调用方那条链接提示更准确
-  if (!/^plan 不合法|缺少 url/.test(msg) && /必须是|只能是|不能带|不合法|缺少|未知的|超出范围|不能为空/i.test(msg)) {
+  // 缺 url 是参数问题，不是链接或凭据问题：给一句能直接照做的提示
+  if (/^缺少 url$/.test(msg)) {
+    out.hint = '缺少必填参数 url：把用户给的设计图链接整条传进来（含 image_id 的那些查询参数），不要自己拼。'
+    return out
+  }
+  // plan 的错误自带说明（正文已写清哪一步怎么做），不要再盖一层参数提示
+  if (!/^plan 不合法/.test(msg) && /必须是|只能是|不能带|不合法|缺少|未知的|超出范围|不能为空/i.test(msg)) {
     out.hint = '调用参数有问题：按工具的参数描述改正后重试，不要原样重试。'
     return out
   }
@@ -196,7 +201,7 @@ export function describeError(error, hint) {
   return out
 }
 
-export function createScreensTool() {
+export function createScreensTool(ctx) {
   return {
     name: 'lanhu_dds_screens',
     description:
@@ -211,13 +216,22 @@ export function createScreensTool() {
       const given = typeof args.cookie === 'string' ? args.cookie.trim() : ''
       const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
+      // 与 build 用同一个项目基准：否则同一个屏，screens 报画布原始宽、build 报归一后的宽，差一个倍数
+      let designWidth = 0
       try {
-        const r = await buildDesign({ url: args.url, cookie, exec, list: true })
+        const projectDir = await resolveProjectDir(ctx, undefined, exec)
+        designWidth = detectUnitBasis(projectDir).designWidth ?? 0
+      } catch { designWidth = 0 }
+      try {
+        const r = await buildDesign({ url: args.url, cookie, exec, list: true, designWidth })
         const saved = given ? saveCookie(given) : null
         return {
           ok: true,
           name: r.name,
           scale: r.scale,
+          // 宽度是「项目基准」下的数值（与 build 同一口径）；div≠1 时说明画布被归一过，别拿画布原始宽去算
+          unit: r.unit,
+          ...(r.div ? { div: r.div, designWidth: r.designWidth } : {}),
           screens: r.screens,
           pages: r.pages,
           ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
@@ -448,7 +462,7 @@ export function readSkill(dir = SKILL_DIR) {
 // ---------------------------------------------------------------- 入口
 
 export function apply(ctx, _config) {
-  for (const make of [() => createScreensTool(), () => createBuildTool(ctx), () => createDoctorTool(ctx)]) {
+  for (const make of [() => createScreensTool(ctx), () => createBuildTool(ctx), () => createDoctorTool(ctx)]) {
     try {
       const dispose = ctx.tools.register(make())
       ctx.effect(() => dispose)
