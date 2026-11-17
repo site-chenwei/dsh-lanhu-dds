@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildDesign } from './lib/build.mjs'
-import { diagnoseProject, initProjectRules, scanAndWriteUiDocs } from './lib/project.mjs'
+import { diagnoseProject, initProjectRules, scanAndWriteUiDocs, detectUnitBasis } from './lib/project.mjs'
 import { describeComponents } from './lib/component-card.mjs'
 import { COOKIE_FILE, PLAN_FILE, readCookie, saveCookie, forgetCookie, pruneSessions, sessionDir } from './lib/store.mjs'
 
@@ -126,7 +126,8 @@ const BUILD_PARAMS = {
     unit: {
       type: 'string',
       enum: ['design', 'css'],
-      description: '输出单位。design（默认）= 直出设计稿 px，750 基准，交给项目内 px→rem 换算；css = 折成 375 逻辑宽的 CSS px。',
+      description:
+        '输出单位。design（默认）= 设计稿 px，按项目 designWidth 归一（画布 1404 宽的 4x 图会 ÷1.872 折成 750 基准，与切图像素同一空间），交给项目内 px→rem 换算；css = 折成 375 逻辑宽的 CSS px。',
     },
     reference: { type: 'boolean', description: '是否下载整张画布参考图并裁出每屏 PNG。默认 true。' },
     assets: { type: 'boolean', description: '是否把切图下载到本地 assets/（含像素宽高与组合碎片小图标预裁）。默认 true。' },
@@ -162,12 +163,17 @@ function renderDoctor(args, value) {
   return [{ type: 'text', text: value.cards.join('\n\n') + missing }]
 }
 
-function describeError(error, hint) {
+export function describeError(error, hint) {
   const msg = String(error?.message ?? error)
   if (/10089|登录权限|permission to access this project|Cookie 过期|未登录|HTTP 40[13]|HTTP 418/i.test(msg)) {
     return cookiePayload('cookie-expired', msg)
   }
   const out = { ok: false, error: msg }
+  // 插件自身抛的异常和链接/Cookie 无关：给方向性错误的提示会让模型去查链接、重试同一次调用，比不给提示更贵
+  if (/Maximum call stack|Converting circular|Cannot read propert|is not a function|of undefined|out of memory/i.test(msg)) {
+    out.hint = '插件内部错误，与链接和 Cookie 无关：不要重试同一调用，把这条 error 原文贴给插件维护者。'
+    return out
+  }
   if (hint) out.hint = hint
   return out
 }
@@ -292,14 +298,14 @@ export function createDoctorTool(ctx) {
           pages: plan.pages.map((pg) => `${pg.file} ← 屏 ${pg.screens.join('、')}`),
           keep: plan.keep,
           drop: plan.drop,
-          next: `代码已写完并过了 lint 时，收尾只剩这一步：pages 的每个文件都已按设计稿实现、keep 的每一项还在、drop 的每一项已去掉${diag.strays.length ? '，并删掉 strays 里的文件' : ''}——各确认一次就交付。不为确认去重读已写的文件或规格表，除非想得起某一条具体没做。代码还没写完时忽略本段。`,
+          next: `代码已写完并过了 lint 时，收尾只剩这一步：pages 的每个文件都已按设计稿实现、keep 的每一项还在、drop 的每一项已去掉${diag.strays.length ? '，并删掉 strays 里的文件' : ''}——各确认一次就交付。图标只按规格表给的尺寸与颜色写了 CSS 占位、资源由用户提供，这不算未完成项；同理不要为确认去重读已写的文件、规格表或图标库，除非想得起某一条具体没做。代码还没写完时忽略本段。`,
         },
       }
     },
   }
 }
 
-export function createBuildTool() {
+export function createBuildTool(ctx) {
   return {
     name: 'lanhu_dds_build',
     description:
@@ -314,6 +320,8 @@ export function createBuildTool() {
       const cookie = given || readCookie()
       if (!cookie) return cookiePayload('missing-cookie')
       try {
+        const projectDir = await resolveProjectDir(ctx, undefined, exec)
+        const { designWidth } = detectUnitBasis(projectDir)
         const r = await buildDesign({
           url: args.url,
           cookie,
@@ -323,6 +331,7 @@ export function createBuildTool() {
           plan: args.plan,
           scale: args.scale,
           unit: args.unit,
+          designWidth,
           reference: args.reference !== false,
           assets: args.assets !== false,
           clean: Boolean(args.clean),
@@ -373,7 +382,7 @@ export function readSkill(dir = SKILL_DIR) {
 // ---------------------------------------------------------------- 入口
 
 export function apply(ctx, _config) {
-  for (const make of [() => createScreensTool(), () => createBuildTool(), () => createDoctorTool(ctx)]) {
+  for (const make of [() => createScreensTool(), () => createBuildTool(ctx), () => createDoctorTool(ctx)]) {
     try {
       const dispose = ctx.tools.register(make())
       ctx.effect(() => dispose)

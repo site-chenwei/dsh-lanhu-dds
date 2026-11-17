@@ -31,7 +31,7 @@ lanhu_dds_doctor({ ui: true })
 
 `doctor` 自动处理三件事：
 
-- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。
+- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。`design` 下 `build` 还会按 `designWidth` 归一：画布 1404 宽的 4x 图除以 1.872 折成 750 基准，规格表里的坐标与切图像素因此处在同一空间。
 - **`agentDocs` 与 `rules`**：若项目根已有完备的 `AGENTS.md` / `CLAUDE.md`，直接认作主规范来源，不再强制生成空白 `project-rules.md` 避免冲突。
 - **`uiPackages` / `iconPackages`**：自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等工具包，递归跟进多级 `export * from` 与深层组件 `.d.ts`（兼容 `DefineComponent<ExtractPropTypes<{...}>>`、`DefineComponent<XxxProps>`、`interface *Props` 及 Windows 反斜杠路径），并为图标包输出全部单图标导出名清单到 `ui-library.md`。
 
