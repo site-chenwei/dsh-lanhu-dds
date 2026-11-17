@@ -171,8 +171,20 @@ export function describeError(error, hint) {
   }
   const out = { ok: false, error: msg }
   // 插件自身抛的异常和链接/Cookie 无关：给方向性错误的提示会让模型去查链接、重试同一次调用，比不给提示更贵
-  if (/Maximum call stack|Converting circular|Cannot read propert|is not a function|of undefined|out of memory/i.test(msg)) {
+  if (/Maximum call stack|Converting circular|Cannot read propert|Cannot convert|is not a function|of undefined|of null|out of memory|Invalid URL/i.test(msg)) {
     out.hint = '插件内部错误，与链接和 Cookie 无关：不要重试同一调用，把这条 error 原文贴给插件维护者。'
+    return out
+  }
+  // 网络抖动、超时、5xx、限流都不是 Cookie 问题：提示成「换 Cookie」会让人白折腾一轮
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|JSON 解析|Unexpected token/i.test(msg)) {
+    // 提示里别再出现「Cookie」：模型看到这个词就会去换 Cookie，而这类失败换什么都没用
+    out.hint = '网络或蓝湖服务端的问题：原样重试一次；仍失败就停下来告诉用户并附上 error 原文，不要连着重试第三次。'
+    return out
+  }
+  // 参数类错误：重试同一份参数没有意义。plan 类除外——它的 error 正文已经写明该去问用户什么，再加一句反而更远
+  // 「缺少 url」例外：这类确实是链接本身的问题，交给调用方那条链接提示更准确
+  if (!/^plan 不合法|缺少 url/.test(msg) && /必须是|只能是|不能带|不合法|缺少|未知的|超出范围|不能为空/i.test(msg)) {
+    out.hint = '调用参数有问题：按工具的参数描述改正后重试，不要原样重试。'
     return out
   }
   if (hint) out.hint = hint
@@ -225,6 +237,10 @@ const DOCTOR_PARAMS = {
         '类名与插槽的渲染出现顺序、全部样式规则体（含 CSS 变量回退值）。要用某个组件却拿不准默认值、插槽位置或内部样式时调它，不用翻 node_modules。',
     },
     pkg: { type: 'string', description: '显式指定 UI 库包名（配合 ui 或 component）；不填则用自动识别到的全部内网 UI 包（自动排除工具/SDK 包）。' },
+    session: {
+      type: 'string',
+      description: '会话目录名。默认取当前 DSH 会话 id；build 时若显式指定过 session，这里填同一个值才能读回它的收尾清单。',
+    },
     forget: { type: 'boolean', description: '删除已保存的蓝湖 Cookie（换号或排查 Cookie 问题时用）。' },
     prune: { type: 'boolean', description: '清掉超过 days 天没动的会话目录（产物 + 临时脚本），不动 Cookie。' },
     days: { type: 'number', description: 'prune 的天数阈值，默认 7。' },
@@ -257,12 +273,23 @@ export function createDoctorTool(ctx) {
       if (args.prune) return { ok: true, ...pruneSessions({ days: args.days ?? 7 }), hint: '已清掉超期会话目录；Cookie 不受影响' }
 
       const dir = await resolveProjectDir(ctx, args.project, exec)
-      if (args.component) {
+      if (args.component !== undefined) {
+        const names = String(args.component).split(',').map((x) => x.trim().replace(/^<|\/?>$/g, '')).filter(Boolean)
+        if (!names.length) {
+          return { ok: false, error: 'component 是空的', hint: '传组件名，如 "XwStepper,XwPageContainer"；要跑项目体检就不要传 component。' }
+        }
         const pkgs = args.pkg ? [args.pkg] : diagnoseProject(dir).uiPackages ?? []
         if (!pkgs.length) return { ok: false, error: '没有识别到内网 UI 包', hint: '用 pkg 参数显式指定包名' }
-        const names = String(args.component).split(',').map((x) => x.trim().replace(/^<|\/?>$/g, '')).filter(Boolean)
         const { cards, missing } = describeComponents(dir, names, pkgs)
-        return { ok: cards.length > 0, cards, missing, searched: pkgs }
+        if (!cards.length) {
+          return {
+            ok: false,
+            error: `没有找到这些组件的实现或类型声明：${missing.join('、')}`,
+            searched: pkgs,
+            hint: '名字要与 ui-library.md 里的写法一致；底层库里透传的组件不会以这个名字出现在本包里。',
+          }
+        }
+        return { ok: true, cards, ...(missing.length ? { missing } : {}), searched: pkgs }
       }
       const actions = {}
       if (args.init) {
@@ -290,12 +317,13 @@ export function createDoctorTool(ctx) {
       // 本会话编译过：把拍板契约带回来。收尾时上下文多半已被压缩，模型不记得写过什么，
       // 会靠重读自己的文件来找安全感；给它一份可逐项勾掉的清单和明确的停止条件
       // 一个会话可能编译过多张设计图（多个画布链接），收尾清单要覆盖全部画布，不能只留最后一次
-      const sessionPath = sessionDir(undefined, exec)
+      const sessionPath = sessionDir(args.session, exec)
       let canvases = []
       try {
         canvases = Object.entries(JSON.parse(readFileSync(join(sessionPath, PLANS_FILE), 'utf8')))
           .map(([id, p]) => ({ id, ...p }))
-      } catch {
+      } catch { /* 老会话只有 plan.json */ }
+      if (!canvases.length) {
         let plan = null
         try { plan = JSON.parse(readFileSync(join(sessionPath, PLAN_FILE), 'utf8')) } catch { /* 还没编译过 */ }
         if (plan) canvases = [{ id: plan.title ?? 'design', ...plan }]

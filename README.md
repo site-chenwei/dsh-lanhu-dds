@@ -102,12 +102,17 @@ lanhu_dds_doctor({ forget: true })
 ~/.dsh-lanhu-dds/
 ├── cookie                          # 蓝湖登录态（0600，验证通过才写），跨会话共用
 └── sessions/
-    └── <会话标识>/                  # 取当前 DSH 会话 id 前 12 位
+    └── <会话标识>/                  # 当前 DSH 会话 id 去掉 session- 前缀、剔掉非字母数字后取前 12 位
         ├── tmp/                    # 本次会话的临时脚本
         └── 我的订单-4a3b8460/       # 本次会话的产物（始终与该画布的 plan 一致；DDS 与切图有缓存，传 clean:true 才重新拉取）
 ```
 
-两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
+两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`；一旦自己指定过 `session`，收尾时 `lanhu_dds_doctor({ session: "<同一个值>" })` 也要传同一个值，否则读不回该会话的 `plans.json`。
+
+两个清理动作都有副作用，别在排查到一半时顺手用：
+
+- `lanhu_dds_doctor({ prune: true, days: 7 })` 删的是**整个会话目录**（`tmp/` 里的临时脚本一起删），只保留 `cookie`。
+- `lanhu_dds_doctor({ forget: true })` 删的是**全机器共用的 `cookie`**，下一个会话会回到 `missing-cookie`。多个会话并行时不要用它「测试一下」。
 
 `out` 只接受一层目录名（带斜杠或 `..` 直接拒绝）。产物不在项目里，**不需要 gitignore**。
 
@@ -118,7 +123,7 @@ lanhu_dds_doctor({ forget: true })
 | `.agents/skills/lanhu-dds-codegen/project-rules.md` | 项目规范（技术栈 / 目录 / token / 字体 / 数据层） |
 | `.agents/skills/lanhu-dds-codegen/ui-library.md` | 内网 UI 组件清单（`lanhu_dds_doctor({ ui: true })` 生成，库升级重跑） |
 
-其余的 `.agents/tmp/`、`dump-*.mjs`、`design/dds/`、`screen-*.json` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`。
+其余的 `.agents/tmp/`、`dump-*.mjs`、`probe-*.mjs` 以及落回项目的 `screen-N.ir.json` / `screen-N.rects.json` / `screen-N.spec.md` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`（它只认这几个模式，其它裸文件不报）。
 
 每屏与汇总产物：
 
@@ -129,7 +134,8 @@ lanhu_dds_doctor({ forget: true })
 | `variants-diff.md` | 自动识别同页面的状态/弹层变体：各自独有的区块，加上同一元素在两屏里不同的字号、间距、颜色、底色、尺寸、文案（含同位置换文案、同文案换位置的元素） |
 | `tokens.css` / `report.md` | 颜色/字体 token 与体检报告（顶部是拍板契约） |
 | `assets/` | 本地切图 + `manifest.json`（内置 `lanhu-oss-*` → `alipic.lanhuapp.com` 带 Cookie+Referer 内网镜像回退 + 原图无遮挡裁切） |
-| `screen-N.ir.json` / `rects.json` / `html` | 原始树结构（屏内相对坐标）、几何表与参考 HTML（备查） |
+| `screen-N.ir.json` / `screen-N.rects.json` / `screen-N.html` | 原始树结构（屏内相对坐标）、几何表与参考 HTML（备查） |
+| `screen-N.outline.md` | 单屏结构大纲（比 `ir.json` 短的备查视图） |
 
 ## 为什么不用 lanhu-mcp
 
@@ -146,7 +152,7 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 ## 已知边界
 
 - **不生成框架代码**。它产出的是「结构 + 几何 + 文案 + 颜色」这些不会错的事实，怎么写代码由模型的 Skill 流程决定（读项目规范后写）。
-- **DDS 给得到的东西就会给到底**：颜色、字号/字重/行高、圆角、边框、背景色、box-shadow（`style.boxShadow`，全项目 4837 个节点里命中 5 次，px 已按设计比归一）、线性渐变（角度+色标完整）、渐变文字（`WebkitBackgroundClip`+`WebkitTextFillColor`）。这些不需要模型猜。
+- **DDS 给得到的东西就会给到底**：颜色、字号/字重/行高、圆角、边框、背景色、box-shadow（`style.boxShadow`，有就输出、px 已按设计比归一；没有命中说明设计稿确实没用投影）、线性渐变（角度+色标完整）、渐变文字（`WebkitBackgroundClip`+`WebkitTextFillColor`）。这些不需要模型猜。
 - **DDS 给不到的**：交互态（hover/active/禁用）、响应式约束、图标矢量（切图是位图）、以及设计稿里靠图层叠加出来的效果。`report.md` 逐条列出缺口，由模型对着裁图补。
 - **整图导入的屏无法还原**：`screens` 返回 `raster: true` 时说明这屏在 DDS 里是一张图，没有结构，只能要源文件。
 - **弹层与页面的边界是结构判断**：整屏只有弹层的帧标 `popup: true` 并挂到所属页面的 `popups`；但「页面 + 盖在上面的确认框」混在同一帧里的稿子按一个页面输出，弹层内容照常出现在树里，拆不拆成两个状态由模型读 `texts` 后向用户确认。
@@ -158,6 +164,7 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 index.js              # 入口：注册 3 个工具 + 1 个 skill
 cordis.patch.yml      # 只插自己这一行
 lib/
+  util.mjs            # 取整、哈希、PNG 尺寸读取等小工具
   lanhu-api.mjs       # 蓝湖接口：链接解析、版本信息、DDS 树、二进制下载
   store.mjs           # Cookie 与按会话隔离的产物目录
   dds-tree.mjs        # 树遍历、几何读取、选屏
