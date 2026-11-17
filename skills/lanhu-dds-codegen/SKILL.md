@@ -127,9 +127,11 @@ lanhu_dds_build({
 - `variants-diff.md` 配对的屏合在同一个页面组件里，用响应式状态切换。
 - 规格表顶部有「行高 / 派生尺寸 / 内距」三行提示时按它算：文字行高（字号×行高）比图层高大，说明 `↑gap` 是按图层高给的，写了 `line-height` 后要从 margin 里扣掉差额；`jc:space-between` 行里的文本宽与 `←gap` 是实测文字宽的派生量，写死会溢出；多层 `rel()` 没有 `pad:` 时内距要逐层累加。
 
+规格表里的 `bd:` 是四边描边，但列表每一行只有分隔线时，四边都写会让相邻两行叠成 2px 双线：把行改成只写 `border-bottom`（容器底部描边改由容器自己写 `border-top`），按 png 回量一次。`jc:space-between` 只用在「两端对齐、中间留空」的行，徽标贴左、文字居中这类内容撑开的盒子按 `↑gap`/`←gap` 排，写 `space-between` 会把它们甩到两端。
+
 按规格表的 `col` / `row`、`pad:`、`↑gap` / `←gap` 写 Flex/Grid 文档流；`=parent` 是与父同框的包装层，可合并。`screen-N.html` 是全屏绝对定位的预览，不照搬。标 `[大段留白…]` 的 `↑gap` 是固定高度稿的摆放，用 `flex: 1` / `margin-top: auto` 撑开，别写成固定 `margin`。
 
-**图标**：插件只写图标的 CSS，图标资源由用户提供。这不是待攻克的部分，别在上面花时间。
+**图标**：插件只写图标的 CSS，图标资源由用户提供。占位要**看得见**：单色图标写 `width/height` + `background-color`（或 `border`），只在有文字字形时用 `color`——空 `div` 只给 `color` 是什么都画不出来的。这不是待攻克的部分，别在上面花时间。
 
 - 规格表标 `图标占位 … 资源待用户提供` 的节点：按它的尺寸写 `width` / `height`（需要时加 `border-radius`、`background`），单色的把色值写进 `color` 或占位底色，配 `aria-label` 或 `aria-hidden="true"`。
 - 不手写 SVG、不去 `node_modules` 或图标库里找“长得像”的、不用 Python/PIL 或 `md5sum` 比对切图、不为图标开浏览器验证。
