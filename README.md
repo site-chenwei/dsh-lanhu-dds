@@ -31,7 +31,7 @@ lanhu_dds_doctor({ ui: true })
 
 `doctor` 自动处理三件事：
 
-- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。`design` 下 `build` 还会按 `designWidth` 归一：画布 1404 宽的 4x 图除以 1.872 折成 750 基准，规格表里的坐标与切图像素因此处在同一空间。
+- **`unit`**：读 `config.ts` 的 `designWidth`（750 → `design`，375 → `css`）或 postcss 的 `rootValue`/`viewportWidth`。`design` 下 `build` 还会按 `designWidth` 归一：首屏实测 1404px 宽的 4x 图除以 1.872 折成 750 基准（除数是首屏原始宽，不是整张画布的宽；切图尺寸按原样给出，不跟着归一）。
 - **`agentDocs` 与 `rules`**：若项目根已有完备的 `AGENTS.md` / `CLAUDE.md`，直接认作主规范来源，不再强制生成空白 `project-rules.md` 避免冲突。
 - **`uiPackages` / `iconPackages`**：自动排除 `@xxx/func`、`@xxx/rrweb-sdk` 等工具包，递归跟进多级 `export * from` 与深层组件 `.d.ts`（兼容 `DefineComponent<ExtractPropTypes<{...}>>`、`DefineComponent<XxxProps>`、`interface *Props` 及 Windows 反斜杠路径），并为图标包输出全部单图标导出名清单到 `ui-library.md`。
 
@@ -87,10 +87,13 @@ lanhu_dds_doctor({ forget: true })
   "ok": false,
   "error": "missing-cookie",
   "cookieFile": "/Users/you/.dsh-lanhu-dds/cookie",
+  "askUser": "停在这里向用户要 Cookie。不要猜、不要伪造、不要绕过它去凭想象编页面结构和样式。",
   "say": "这次还原需要蓝湖登录态：给我一份蓝湖网页的 Cookie（F12 里那个整行 Cookie）。",
   "howToGet": "浏览器登录蓝湖 → F12 → Network → 任一 lanhuapp.com 请求 → 复制完整 Cookie 请求头",
   "howToGive": ["直接在对话里贴给我，我验证通过后会存到 ~/.dsh-lanhu-dds/cookie（0600），以后所有会话都不必再贴"],
-  "whatHappensNext": "收到后我先用一个真实设计图验证能不能读，通过就存到 …（0600），以后所有会话都不用再贴；不通过我会告诉你，绝不存坏值。"
+  "whatHappensNext": "收到后我先用一个真实设计图验证能不能读，通过就存到 …（0600），以后所有会话都不用再贴；不通过我会告诉你，绝不存坏值。",
+  "afterFill": "以后只要这个文件还在就直接用；换号或过期时重贴一次，自动覆盖。",
+  "security": "只存本机 0600 权限的文件，不回显、不写入任何日志或产物"
 }
 ```
 
@@ -123,7 +126,7 @@ lanhu_dds_doctor({ forget: true })
 | `.agents/skills/lanhu-dds-codegen/project-rules.md` | 项目规范（技术栈 / 目录 / token / 字体 / 数据层） |
 | `.agents/skills/lanhu-dds-codegen/ui-library.md` | 内网 UI 组件清单（`lanhu_dds_doctor({ ui: true })` 生成，库升级重跑） |
 
-其余的 `.agents/tmp/`、`dump-*.mjs`、`probe-*.mjs` 以及落回项目的 `screen-N.ir.json` / `screen-N.rects.json` / `screen-N.spec.md` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`（它只认这几个模式，其它裸文件不报）。
+其余的 `.agents/tmp/`、`dump-*.mjs`、`probe-*.mjs` 以及落回项目的 `screen-N.ir.json` / `screen-N.rects.json` / `screen-N.spec.md` 都是污染，`lanhu_dds_doctor` 会扫出来报 `strays`。它认的模式是 `screen-N.ir.json` / `screen-N.rects.json` / `screen-N.spec.md` 这类产物名，外加 `tmp/`、`scratch/`、`.lanhu-dds/`、`design/dds/` 这几个目录；其它裸文件不报。
 
 每屏与汇总产物：
 
@@ -156,7 +159,9 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 - **DDS 给不到的**：交互态（hover/active/禁用）、响应式约束、图标矢量（切图是位图）、以及设计稿里靠图层叠加出来的效果。`report.md` 逐条列出缺口，由模型对着裁图补。
 - **整图导入的屏无法还原**：`screens` 返回 `raster: true` 时说明这屏在 DDS 里是一张图，没有结构，只能要源文件。
 - **弹层与页面的边界是结构判断**：整屏只有弹层的帧标 `popup: true` 并挂到所属页面的 `popups`；但「页面 + 盖在上面的确认框」混在同一帧里的稿子按一个页面输出，弹层内容照常出现在树里，拆不拆成两个状态由模型读 `texts` 后向用户确认。
-- **选屏靠两条可算的事实**：候选屏要内容铺满自身宽度（最宽的直接子节点 ≥ 自身 85%），或顶部 8% 内贴着状态栏时钟。展示板（灰底 + 标题牌 + 居中一台手机）两条都不成立，于是被跳过、认里面那台手机；两条都算不出来时回退到「最浅一层的窄高矩形」，此时画布上的注释文字会混进规格表。
+- **选屏靠两条可算的事实**：候选屏要内容铺满自身宽度（最宽的直接子节点 ≥ 自身 85%），或顶部 8% 内贴着状态栏时钟。展示板（灰底 + 标题牌 + 居中一台手机）两条都不成立，于是被跳过、认里面那台手机。过了这两道之后按「谁被谁包住」去重（等大的包装层只留外层；比机身更高的滚动内容只留机身），再按宽度取数量最多的那一批。两条事实都算不出来时不做这层过滤，画布上的注释文字会混进规格表。
+- **整图屏与空框分开算**：只有一个子节点且那是图片 = 整图屏（`raster`，规格表说「无法结构化还原」）；只有空盒子 = 空框（`empty`，会被 `unplanned` 提示「要跟用户确认真要不要」）。两者都不该静默当成正常页面。
+- **已知选不准的两种稿子**：一个帧被单独塞进一层比它宽得多的行容器分组（只会选到其中一帧）、一帧里既有页面又有整块盖在上面的弹层且两者位置错开（会被当成两屏）。遇到这两种，用 `screens` 的返回人工核对一遍再填 `plan`。
 
 ## 目录
 
@@ -164,7 +169,7 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 index.js              # 入口：注册 3 个工具 + 1 个 skill
 cordis.patch.yml      # 只插自己这一行
 lib/
-  util.mjs            # 取整、哈希、PNG 尺寸读取等小工具
+  util.mjs            # 取整、HTML 实体解码、Markdown/CSS 转义
   lanhu-api.mjs       # 蓝湖接口：链接解析、版本信息、DDS 树、二进制下载
   store.mjs           # Cookie 与按会话隔离的产物目录
   dds-tree.mjs        # 树遍历、几何读取、选屏

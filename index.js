@@ -128,7 +128,7 @@ const BUILD_PARAMS = {
       type: 'string',
       enum: ['design', 'css'],
       description:
-        '输出单位。design（默认）= 设计稿 px，按项目 designWidth 归一（画布 1404 宽的 4x 图会 ÷1.872 折成 750 基准，与切图像素同一空间），交给项目内 px→rem 换算；css = 折成 375 逻辑宽的 CSS px。',
+        '输出单位。design（默认）= 设计稿 px，按项目 designWidth 归一（首屏实测 1404px 宽的 4x 图会 ÷1.872 折成 750 基准，切图尺寸按原样给出），交给项目内 px→rem 换算；css = 折成 375 逻辑宽的 CSS px。',
     },
     reference: { type: 'boolean', description: '是否下载整张画布参考图并裁出每屏 PNG。默认 true。' },
     assets: { type: 'boolean', description: '是否把切图下载到本地 assets/（含像素宽高与组合碎片小图标预裁）。默认 true。' },
@@ -179,6 +179,11 @@ export function describeError(error, hint) {
   if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|JSON 解析|Unexpected token/i.test(msg)) {
     // 提示里别再出现「Cookie」：模型看到这个词就会去换 Cookie，而这类失败换什么都没用
     out.hint = '网络或蓝湖服务端的问题：原样重试一次；仍失败就停下来告诉用户并附上 error 原文，不要连着重试第三次。'
+    return out
+  }
+  // 本地磁盘/权限问题既不是链接也不是凭据问题：混进默认支会让模型去换 Cookie
+  if (/EPERM|EACCES|ENOSPC|EROFS|EMFILE|ENOTDIR|EISDIR|EBUSY|ENOENT/i.test(msg)) {
+    out.hint = '本地文件读写失败：检查输出目录是否可写、磁盘是否已满、路径是否被占用或不存在。换个输出目录或清理空间后重试。'
     return out
   }
   // 参数类错误：重试同一份参数没有意义。plan 类除外——它的 error 正文已经写明该去问用户什么，再加一句反而更远
