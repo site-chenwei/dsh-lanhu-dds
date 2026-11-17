@@ -14,9 +14,9 @@
 | 能力 | 名字 | 作用 |
 |---|---|---|
 | 工具 | `lanhu_dds_screens` | 列出设计图里的所有手机屏（一张图常横排 5~10 屏）：每屏的导航标题、是否弹层、去壳后的全部业务文案，以及「哪几屏是同一个页面」的分组。不落盘、不下载，够用来向用户确认范围 |
-| 工具 | `lanhu_dds_build` | 按用户确认的 `plan`（模式 + 页面文件 → 屏号 + 旧功能去留，必填）编译：产出单文件紧凑规格表 `screen-N.spec.md`（顶部带拍板契约与切图清单）、设计稿裁图 `screen-N.png`、同页多屏差异 `variants-diff.md`（独有区块 + 同一元素的属性差）、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退 |
-| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md`（兼容 Windows 路径、`DefineComponent<ExtractPropTypes<...>>` 与全量图标导出名列表）；传 `component` 返回组件卡片（prop 默认值、事件、插槽与类名出现顺序、样式规则体） |
-| Skill | `lanhu-dds-codegen` | 选屏 → 一次拍板 → 按 plan 编译 → 按页面文件逐个还原 → 验收交付的流程 |
+| 工具 | `lanhu_dds_build` | 按用户确认的 `plan`（模式 + 页面文件 → 屏号 + 旧功能去留，必填）编译：产出单文件紧凑规格表 `screen-N.spec.md`（顶部带拍板契约与切图清单）、设计稿裁图 `screen-N.png`、同页多屏差异 `variants-diff.md`（独有区块 + 同一元素的属性差）、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退。返回值 `work` 按页面文件分组，顺序即出码顺序 |
+| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md`（兼容 Windows 路径、`DefineComponent<ExtractPropTypes<...>>` 与全量图标导出名列表）；传 `component` 返回组件卡片（prop 默认值、事件、插槽与类名出现顺序、样式规则体；定位不到实现的组件退到类型声明出卡）；本会话编译过之后，无参调用会附带 `closeout`（拍板契约清单，供收尾逐项确认） |
+| Skill | `lanhu-dds-codegen` | 选屏 → 一次拍板 → 按 plan 编译 → 按 `work` 逐个文件还原 → 按 `closeout` 确认后交付的流程 |
 
 ## 接入（内网装完之后的第一件事）
 
@@ -124,9 +124,9 @@ lanhu_dds_doctor({ forget: true })
 
 | 文件 | 作用 |
 |---|---|
-| `screen-N.spec.md` | **主输入**：单文件紧凑规格表（拍板契约 + 切图与小图标清单 + 组件候选 + 屏内 `(0,0)` 坐标 + 父相位移 + 兄弟间距 + 完整样式 + 文案 + 切图真实像素尺寸 + 组合碎片图标预裁图） |
+| `screen-N.spec.md` | **主输入**：单文件紧凑规格表（拍板契约 + 切图与小图标清单（小图标标出单色色值或多色） + 组件候选 + 屏内 `(0,0)` 坐标 + 父相位移 + 兄弟间距 + 完整样式 + 文案 + 切图真实像素尺寸 + 组合碎片图标预裁图） |
 | `screen-N.png` | 设计稿裁图（视觉唯一真相） |
-| `variants-diff.md` | 自动识别同页面的状态/弹层变体：各自独有的区块，加上同一元素在两屏里不同的字号、间距、颜色、尺寸、文案 |
+| `variants-diff.md` | 自动识别同页面的状态/弹层变体：各自独有的区块，加上同一元素在两屏里不同的字号、间距、颜色、底色、尺寸、文案（含同位置换文案、同文案换位置的元素） |
 | `tokens.css` / `report.md` | 颜色/字体 token 与体检报告（顶部是拍板契约） |
 | `assets/` | 本地切图 + `manifest.json`（内置 `lanhu-oss-*` → `alipic.lanhuapp.com` 带 Cookie+Referer 内网镜像回退 + 原图无遮挡裁切） |
 | `screen-N.ir.json` / `rects.json` / `html` | 原始树结构（屏内相对坐标）、几何表与参考 HTML（备查） |

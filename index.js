@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { buildDesign } from './lib/build.mjs'
 import { diagnoseProject, initProjectRules, scanAndWriteUiDocs } from './lib/project.mjs'
 import { describeComponents } from './lib/component-card.mjs'
-import { COOKIE_FILE, readCookie, saveCookie, forgetCookie, pruneSessions } from './lib/store.mjs'
+import { COOKIE_FILE, PLAN_FILE, readCookie, saveCookie, forgetCookie, pruneSessions, sessionDir } from './lib/store.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SKILL_DIR = join(HERE, 'skills', 'lanhu-dds-codegen')
@@ -157,7 +157,7 @@ function renderJson(_args, value) {
 function renderDoctor(args, value) {
   if (!value.cards) return renderJson(args, value)
   const missing = value.missing?.length
-    ? `\n\n未找到：${value.missing.join('、')}（在 ${value.searched.join('、')} 的编译产物里没有 \`__name\` 等于它的组件；确认名字与 ui-library.md 里一致，或它是底层库透传的组件）`
+    ? `\n\n未找到：${value.missing.join('、')}（在 ${value.searched.join('、')} 的编译产物和类型声明里都没有这个名字；确认它与 ui-library.md 里的写法一致，或它是底层库透传的组件）`
     : ''
   return [{ type: 'text', text: value.cards.join('\n\n') + missing }]
 }
@@ -280,7 +280,21 @@ export function createDoctorTool(ctx) {
             : '请按 diagnosis.todos 处理剩余项；若项目已有完备 AGENTS.md，以其为最高准则。',
         }
       }
-      return diag
+      // 本会话编译过：把拍板契约带回来。收尾时上下文多半已被压缩，模型不记得写过什么，
+      // 会靠重读自己的文件来找安全感；给它一份可逐项勾掉的清单和明确的停止条件
+      let plan = null
+      try { plan = JSON.parse(readFileSync(join(sessionDir(undefined, exec), PLAN_FILE), 'utf8')) } catch { /* 还没编译过 */ }
+      if (!plan) return diag
+      return {
+        ...diag,
+        closeout: {
+          mode: plan.mode,
+          pages: plan.pages.map((pg) => `${pg.file} ← 屏 ${pg.screens.join('、')}`),
+          keep: plan.keep,
+          drop: plan.drop,
+          next: `代码已写完并过了 lint 时，收尾只剩这一步：pages 的每个文件都已按设计稿实现、keep 的每一项还在、drop 的每一项已去掉${diag.strays.length ? '，并删掉 strays 里的文件' : ''}——各确认一次就交付。不为确认去重读已写的文件或规格表，除非想得起某一条具体没做。代码还没写完时忽略本段。`,
+        },
+      }
     },
   }
 }

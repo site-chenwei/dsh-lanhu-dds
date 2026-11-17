@@ -33,11 +33,13 @@ Status: implemented
 - **`plan` 校验**（`normalizePlan`，`lib/build.mjs`）：`mode` 只能是 `rewrite` / `optimize`；`pages` 至少一项；屏号必须存在；一屏只能归一个文件。失败时报错以 `plan 不合法：` 开头并自带下一步，此类报错不附加链接或 Cookie 提示。
 - **规格表契约行**：`> 拍板契约：<模式> → \`<文件>\`；同文件还有屏 …；保留旧页功能：…；移除旧页功能：…`。`report.md` 对应 `## 拍板契约（用户已确认，出码与收尾都以此为准）`。
 - **`lanhu_dds_screens` 返回**：`{ ok, name, scale, screens: [{ index, title, width, height, nodes, raster?, popup?, texts, moreTexts? }], pages: [{ title, screens, popups?, popupOnly? }] }`。
-- **`lanhu_dds_build` 返回**：`{ ok, outDir, tmpDir, unit, scale, built: [{ index, title, file, spec, png, pngError?, raster?, warnings? }], assets: { saved, placeholders? }, variantsDiff?, variantPairs? }`。
+- **`lanhu_dds_build` 返回**：0.8.0 为按屏平铺的 `built[]` 加 `variantPairs`；0.9.0 起改为按页面文件分组的 `work[]`，见 [按文件分组的工单、图标单色判定与收尾清单](2026-11-17-per-file-work-and-closeout.md)。
 - **组件卡片是 Markdown 正文**，不是 JSON；找不到的组件在末尾列出并说明查找范围。渲染结构只给出现顺序，不承诺嵌套层级。
 - **切图记录带 `bytes`**：`b.asset` 与 `b.compositeAsset` 都有 `bytes` 字段，规格表直接使用。
 - **模块布局**（`lib/`）：`lanhu-api` 接口、`store` Cookie 与会话目录、`dds-tree` 遍历与选屏、`compile` 单屏编译、`spec` 规格表、`variants` 配对与差异、`assets` 切图、`render-html`、`report`、`build` 高层入口、`project` 项目自检、`ui-library` 速查表、`component-card` 组件卡片、`png`。依赖方向单向：`build` 依赖其余编译模块；`variants`、`assets` 依赖 `spec`；`project` 依赖 `store` 与 `ui-library`；`ui-library`、`component-card` 没有内部依赖。
 - `parseLanhuUrl` 在链接缺少 `image_id` / `project_id` 时抛错，不调用 `process.exit`。
+
+本篇「代价」里组件卡片只认 `__name`、属性差表只覆盖签名命中节点这两条，以及「未验证」里的真实重跑，后续结果都记在 [按文件分组的工单、图标单色判定与收尾清单](2026-11-17-per-file-work-and-closeout.md)。
 
 壳层折叠、切图回退与 `.d.ts` 解析的决定仍在 [折叠页面壳层、修复背景切图与桶文件组件签名提取](2026-11-16-chrome-folding-and-ui-dts-resolution.md)；那篇里「靠技能禁令约束提问顺序与编译范围」的做法由本篇第 1–3 条接管。
 
