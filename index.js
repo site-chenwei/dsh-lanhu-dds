@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { buildDesign } from './lib/build.mjs'
 import { diagnoseProject, initProjectRules, scanAndWriteUiDocs, detectUnitBasis } from './lib/project.mjs'
 import { describeComponents } from './lib/component-card.mjs'
-import { COOKIE_FILE, PLAN_FILE, readCookie, saveCookie, forgetCookie, pruneSessions, sessionDir } from './lib/store.mjs'
+import { COOKIE_FILE, PLAN_FILE, PLANS_FILE, readCookie, saveCookie, forgetCookie, pruneSessions, sessionDir } from './lib/store.mjs'
 import { UI_DOC_REL } from './lib/ui-library.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -289,17 +289,46 @@ export function createDoctorTool(ctx) {
       }
       // 本会话编译过：把拍板契约带回来。收尾时上下文多半已被压缩，模型不记得写过什么，
       // 会靠重读自己的文件来找安全感；给它一份可逐项勾掉的清单和明确的停止条件
-      let plan = null
-      try { plan = JSON.parse(readFileSync(join(sessionDir(undefined, exec), PLAN_FILE), 'utf8')) } catch { /* 还没编译过 */ }
-      if (!plan) return diag
+      // 一个会话可能编译过多张设计图（多个画布链接），收尾清单要覆盖全部画布，不能只留最后一次
+      const sessionPath = sessionDir(undefined, exec)
+      let canvases = []
+      try {
+        canvases = Object.entries(JSON.parse(readFileSync(join(sessionPath, PLANS_FILE), 'utf8')))
+          .map(([id, p]) => ({ id, ...p }))
+      } catch {
+        let plan = null
+        try { plan = JSON.parse(readFileSync(join(sessionPath, PLAN_FILE), 'utf8')) } catch { /* 还没编译过 */ }
+        if (plan) canvases = [{ id: plan.title ?? 'design', ...plan }]
+      }
+      if (!canvases.length) return diag
+      const next = `代码已写完并过了 lint 时，收尾只剩这一步：pages 的每个文件都已按设计稿实现、keep 的每一项还在、drop 的每一项已去掉${diag.strays.length ? '，并删掉 strays 里的文件' : ''}——各确认一次就交付。图标只按规格表给的尺寸与颜色写了 CSS 占位、资源由用户提供，这不算未完成项；同理不要为确认去重读已写的文件、规格表或图标库，除非想得起某一条具体没做。代码还没写完时忽略本段。`
+      const asPages = (p) => p.pages.map((pg) => `${pg.file} ← 屏 ${pg.screens.join('、')}`)
+      if (canvases.length === 1) {
+        const plan = canvases[0]
+        return {
+          ...diag,
+          closeout: {
+            ...(plan.title ? { title: plan.title } : {}),
+            mode: plan.mode,
+            pages: asPages(plan),
+            keep: plan.keep,
+            drop: plan.drop,
+            next,
+          },
+        }
+      }
       return {
         ...diag,
         closeout: {
-          mode: plan.mode,
-          pages: plan.pages.map((pg) => `${pg.file} ← 屏 ${pg.screens.join('、')}`),
-          keep: plan.keep,
-          drop: plan.drop,
-          next: `代码已写完并过了 lint 时，收尾只剩这一步：pages 的每个文件都已按设计稿实现、keep 的每一项还在、drop 的每一项已去掉${diag.strays.length ? '，并删掉 strays 里的文件' : ''}——各确认一次就交付。图标只按规格表给的尺寸与颜色写了 CSS 占位、资源由用户提供，这不算未完成项；同理不要为确认去重读已写的文件、规格表或图标库，除非想得起某一条具体没做。代码还没写完时忽略本段。`,
+          canvasCount: canvases.length,
+          canvases: canvases.map((p) => ({
+            title: p.title || p.id,
+            mode: p.mode,
+            pages: asPages(p),
+            keep: p.keep,
+            drop: p.drop,
+          })),
+          next: `本会话编译了 ${canvases.length} 张设计图：把下面每个画布的 pages 逐条确认一次就交付（全部确认完才算收尾，别只做最后一个）。${next}`,
         },
       }
     },

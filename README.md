@@ -15,7 +15,7 @@
 |---|---|---|
 | 工具 | `lanhu_dds_screens` | 列出设计图里的所有手机屏（一张图常横排 5~10 屏）：每屏的导航标题、是否弹层、去壳后的全部业务文案，以及「哪几屏是同一个页面」的分组。不落盘、不下载，够用来向用户确认范围 |
 | 工具 | `lanhu_dds_build` | 按用户确认的 `plan`（模式 + 页面文件 → 屏号 + 旧功能去留，必填）编译：产出单文件紧凑规格表 `screen-N.spec.md`（顶部带拍板契约与切图清单）、设计稿裁图 `screen-N.png`、同页多屏差异 `variants-diff.md`（独有区块 + 同一元素的属性差）、汇总体检报告 `report.md`，并内置 `lanhu-oss-* → alipic.lanhuapp.com` 内网切图镜像回退。返回值 `work` 按页面文件分组，顺序即出码顺序 |
-| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md`（兼容 Windows 路径、`DefineComponent<ExtractPropTypes<...>>` 与全量图标导出名列表）；传 `component` 返回组件卡片（prop 默认值、事件、插槽与类名出现顺序、样式规则体；定位不到实现的组件退到类型声明出卡）；本会话编译过之后，无参调用会附带 `closeout`（拍板契约清单，供收尾逐项确认） |
+| 工具 | `lanhu_dds_doctor` | 项目接入自检：自动取当前会话工作目录、读出 `unit`、识别既有 `AGENTS.md`、区分内网 UI 库/图标库与工具包，支持一键生成 `ui-library.md`（兼容 Windows 路径、`DefineComponent<ExtractPropTypes<...>>` 与全量图标导出名列表）；传 `component` 返回组件卡片（prop 默认值、事件、插槽与类名出现顺序、样式规则体；定位不到实现的组件退到类型声明出卡）；本会话编译过之后，无参调用会附带 `closeout`（拍板契约清单，供收尾逐项确认；一个会话编译过多张画布时按画布分组返回 `canvasCount`/`canvases`） |
 | Skill | `lanhu-dds-codegen` | 选屏 → 一次拍板 → 按 plan 编译 → 按 `work` 逐个文件还原 → 按 `closeout` 确认后交付的流程 |
 
 ## 接入（内网装完之后的第一件事）
@@ -104,7 +104,7 @@ lanhu_dds_doctor({ forget: true })
 └── sessions/
     └── <会话标识>/                  # 取当前 DSH 会话 id 前 12 位
         ├── tmp/                    # 本次会话的临时脚本
-        └── 我的订单-4a3b8460/       # 本次会话的产物（始终与最近一次 plan 一致；DDS 与切图有缓存，传 clean:true 才重新拉取）
+        └── 我的订单-4a3b8460/       # 本次会话的产物（始终与该画布的 plan 一致；DDS 与切图有缓存，传 clean:true 才重新拉取）
 ```
 
 两次对话互相看不到对方的产物，也不会在根目录堆成一坨。想跨会话复用同一份产物才传 `session`。攒多了用 `lanhu_dds_doctor({ prune: true, days: 7 })` 清掉超期会话。
@@ -149,6 +149,7 @@ lanhu-mcp 的视觉工具（`lanhu_inspect_design_region` 等）在需要局部�
 - **DDS 给得到的东西就会给到底**：颜色、字号/字重/行高、圆角、边框、背景色、box-shadow（`style.boxShadow`，全项目 4837 个节点里命中 5 次，px 已按设计比归一）、线性渐变（角度+色标完整）、渐变文字（`WebkitBackgroundClip`+`WebkitTextFillColor`）。这些不需要模型猜。
 - **DDS 给不到的**：交互态（hover/active/禁用）、响应式约束、图标矢量（切图是位图）、以及设计稿里靠图层叠加出来的效果。`report.md` 逐条列出缺口，由模型对着裁图补。
 - **整图导入的屏无法还原**：`screens` 返回 `raster: true` 时说明这屏在 DDS 里是一张图，没有结构，只能要源文件。
+- **弹层与页面的边界是结构判断**：整屏只有弹层的帧标 `popup: true` 并挂到所属页面的 `popups`；但「页面 + 盖在上面的确认框」混在同一帧里的稿子按一个页面输出，弹层内容照常出现在树里，拆不拆成两个状态由模型读 `texts` 后向用户确认。
 - **选屏靠两条可算的事实**：候选屏要内容铺满自身宽度（最宽的直接子节点 ≥ 自身 85%），或顶部 8% 内贴着状态栏时钟。展示板（灰底 + 标题牌 + 居中一台手机）两条都不成立，于是被跳过、认里面那台手机；两条都算不出来时回退到「最浅一层的窄高矩形」，此时画布上的注释文字会混进规格表。
 
 ## 目录
