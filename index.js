@@ -166,19 +166,29 @@ function renderDoctor(args, value) {
 
 export function describeError(error, hint) {
   const msg = String(error?.message ?? error)
-  if (/10089|登录权限|permission to access this project|Cookie 过期|未登录|HTTP 40[13]|HTTP 418/i.test(msg)) {
+  // 匹配前先把 URL 摘掉：getJson 的报错形态是「${url} → HTTP ${status}」，URL 查询串里的
+  // version_id=10089 之类会先撞上 cookie 词表，把服务端 5xx 误判成 Cookie 过期
+  const body = msg.replace(/https?:\/\/\S+/g, ' ')
+  if (/10089|登录权限|permission to access this project|Cookie 过期|未登录|HTTP 40[13]|HTTP 418/i.test(body)) {
     return cookiePayload('cookie-expired', msg)
   }
   const out = { ok: false, error: msg }
   // 插件自身抛的异常和链接/Cookie 无关：给方向性错误的提示会让模型去查链接、重试同一次调用，比不给提示更贵
-  if (/Maximum call stack|Converting circular|Cannot read propert|Cannot convert|is not a function|of undefined|of null|out of memory|Invalid URL/i.test(msg)) {
+  // 词表对去反引号的正文匹配：Node 的解构报错带反引号（Cannot destructure property `name` of `undefined`）
+  const flat = msg.replace(/`+/g, '')
+  if (/Maximum call stack|Converting circular|Cannot read propert|Cannot convert|is not a function|of undefined|of null|Cannot destructure|out of memory|Invalid URL/i.test(flat)) {
     out.hint = '插件内部错误，与链接和 Cookie 无关：不要重试同一调用，把这条 error 原文贴给插件维护者。'
     return out
   }
-  // 网络抖动、超时、5xx、限流都不是 Cookie 问题：提示成「换 Cookie」会让人白折腾一轮
-  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|JSON 解析|Unexpected token|非 JSON/i.test(msg)) {
+  // 网络抖动、超时、5xx、429、下载 404/空内容都不是 Cookie 问题：提示成「换 Cookie」会让人白折腾一轮
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|aborted due to timeout|network|HTTP 5\d\d|HTTP 429|HTTP 404|JSON 解析|Unexpected token|Unexpected end of JSON|非 JSON|下载失败|下载返回空内容/i.test(flat)) {
     // 提示里别再出现「Cookie」：模型看到这个词就会去换 Cookie，而这类失败换什么都没用
     out.hint = '网络或蓝湖服务端的问题：原样重试一次；仍失败就停下来告诉用户并附上 error 原文，不要连着重试第三次。'
+    return out
+  }
+  // 蓝湖接口返回了 2xx 但形状不对（缺 result / 缺 data_resource_url）：不是参数错也不是凭据错
+  if (/响应缺 result|没有 data_resource_url/i.test(flat)) {
+    out.hint = '蓝湖接口返回的形状与预期不符：原样重试一次；仍失败就把 error 原文告诉用户，不要当成 Cookie 或链接问题。'
     return out
   }
   // 本地磁盘/权限问题既不是链接也不是凭据问题：混进默认支会让模型去换 Cookie
@@ -237,7 +247,7 @@ export function createScreensTool(ctx) {
           ...(saved?.ok ? { cookieSavedTo: saved.path } : {}),
         }
       } catch (error) {
-        return describeError(error, '检查链接是否指向设计图（不是 PRD），以及 Cookie 是否过期。')
+        return describeError(error, '这条错误不在已知分类里：把 error 原文告诉用户，不要自行猜测 Cookie 或链接问题；重试前先核对 url 与参数。')
       }
     },
   }
@@ -288,7 +298,10 @@ export function createDoctorTool(ctx) {
     parameters: DOCTOR_PARAMS,
     output: { schema: OUTPUT_SCHEMA, render: renderDoctor },
     async execute(args, exec) {
-      if (args.forget) return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
+      if (args.forget) {
+        if (!existsSync(COOKIE_FILE)) return { ok: true, hint: '本来就没有存过 Cookie，无需删除' }
+        return { ok: true, ...forgetCookie(), hint: '已删除存着的 Cookie，下次调用会重新向用户要' }
+      }
       if (args.prune) return { ok: true, ...pruneSessions({ days: args.days ?? 7 }), hint: '已清掉超期会话目录；Cookie 不受影响' }
 
       const dir = await resolveProjectDir(ctx, args.project, exec)
@@ -374,6 +387,7 @@ export function createDoctorTool(ctx) {
             pages: asPages(p),
             keep: p.keep,
             drop: p.drop,
+            ...(p.outDir ? { outDir: p.outDir } : {}),
           })),
           next: `本会话编译了 ${canvases.length} 张设计图：把下面每个画布的 pages 逐条确认一次就交付（全部确认完才算收尾，别只做最后一个）。${next}`,
         },

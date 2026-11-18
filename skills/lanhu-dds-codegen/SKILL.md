@@ -32,7 +32,7 @@ Cookie 等同登录态：不写进代码、不提交、不在回复里回显。
 `lanhu_dds_doctor({})` 自动定位当前工作目录，返回：
 
 - `unit`：输出单位（`designWidth` 750 → `design`，375 → `css`）。
-- `rules`：项目已有 `AGENTS.md` / `CLAUDE.md` 时以它为准（`delegatedTo`）；两者都没有再跑 `lanhu_dds_doctor({ init: true, ui: true })` 生成模板并按仓库现状补齐。
+- `rules`：项目已有 `AGENTS.md` / `CLAUDE.md` 时以它为准（`delegatedTo`）；两者都没有再跑 `lanhu_dds_doctor({ init: true, ui: true })` 生成模板并按仓库现状补齐。注意：过短（约 200 字符以下）的 `AGENTS.md` 体检识别不到——确信项目有规范就按它执行，不必因为 `rules` 说没有而重谈一遍。
 - `ui`：`present: false` 时跑 `lanhu_dds_doctor({ ui: true })` 生成 `.agents/skills/lanhu-dds-codegen/ui-library.md`（组件、props、插槽、CSS 变量、全量图标名）；`usable: false` 时按 `ui.askUser` 向用户要组件清单。
 
 开工前读一遍项目主规范、`ui-library.md`、全局主题变量文件和目标模块的共享入口（如 `shared.ts`、路由定义）。
@@ -127,13 +127,13 @@ lanhu_dds_build({
 - `variants-diff.md` 配对的屏合在同一个页面组件里，用响应式状态切换。
 - 规格表顶部有「行高 / 派生尺寸 / 内距」三行提示时按它算：文字行高（字号×行高）比图层高大，说明 `↑gap` 是按图层高给的，写了 `line-height` 后要从 margin 里扣掉差额；`jc:space-between` 行里的文本宽与 `←gap` 是实测文字宽的派生量，写死会溢出；多层 `rel()` 没有 `pad:` 时内距要逐层累加。
 
-规格表里的 `bd:` 是四边描边，但列表每一行只有分隔线时，四边都写会让相邻两行叠成 2px 双线：把行改成只写 `border-bottom`（容器底部描边改由容器自己写 `border-top`），按 png 回量一次。`jc:space-between` 只用在「两端对齐、中间留空」的行，徽标贴左、文字居中这类内容撑开的盒子按 `↑gap`/`←gap` 排，写 `space-between` 会把它们甩到两端。
+规格表树行里的 `border:` 是四边描边，`borderTop:` / `borderBottom:` / `borderLeft:` / `borderRight:` 是单边描边。列表每一行只有分隔线时，四边都写会让相邻两行叠成 2px 双线：把行改成只写 `border-bottom`（容器底部描边改由容器自己写 `border-top`），按 png 回量一次。`jc:space-between` 只用在「两端对齐、中间留空」的行，徽标贴左、文字居中这类内容撑开的盒子按 `↑gap`/`←gap` 排，写 `space-between` 会把它们甩到两端。规格表开头若给出「树序提示」（兄弟顺序 ≠ 视觉顺序）、「同行拆分提示」（同矩形的多个文字/图标片段是一行拆开的 inline 内容）、「负偏移提示」（越界装饰用绝对定位），照提示处理，别按树的字面顺序排。
 
 按规格表的 `col` / `row`、`pad:`、`↑gap` / `←gap` 写 Flex/Grid 文档流；`=parent` 是与父同框的包装层，可合并。`screen-N.html` 是全屏绝对定位的预览，不照搬。标 `[大段留白…]` 的 `↑gap` 是固定高度稿的摆放，用 `flex: 1` / `margin-top: auto` 撑开，别写成固定 `margin`。
 
 **图标**：插件只写图标的 CSS，图标资源由用户提供。占位要**看得见**：单色图标写 `width/height` + `background-color`（或 `border`），只在有文字字形时用 `color`——空 `div` 只给 `color` 是什么都画不出来的。这不是待攻克的部分，别在上面花时间。
 
-- 规格表标 `图标占位 … 资源待用户提供` 的节点：按它的尺寸写 `width` / `height`（需要时加 `border-radius`、`background`），单色的把色值写进 `color` 或占位底色，配 `aria-label` 或 `aria-hidden="true"`。
+- 规格表标 `图标占位 … 资源待用户提供` 的节点：尺寸按该节点树行 `@(... WxH)` 的 `W`/`H` 写（不是图标清单里图档的 48×48；需要时加 `border-radius`、`background`），单色的把色值写进 `color` 或占位底色，配 `aria-label` 或 `aria-hidden="true"`。
 - 不手写 SVG、不去 `node_modules` 或图标库里找“长得像”的、不用 Python/PIL 或 `md5sum` 比对切图、不为图标开浏览器验证。
 - `composite-icon:` 是编译器预先拼好的整图，同样只写占位，不引这张图。
 - 所有图标占位都是交付待办，`report.md` 的「待用户提供」一节已汇总。
@@ -154,4 +154,4 @@ lanhu_dds_build({
 
 是否提交、提交哪些文件由项目规范决定，本技能不要求提交。项目的 commit hook 报错时修掉报错或把情况告诉用户，不用 `--no-verify` 或改 `core.hooksPath` 跳过。`ui-library.md` 是否入库同样听项目规范；规范没提就保持未跟踪，不和业务改动混在一个提交里。纯视图还原不需要新建决策笔记，除非用户要求。
 
-页面能在本地打开且用户要求 DOM 复核时，可在根元素加 `data-check-root`，在控制台对比 `screen-N.rects.json`（`K = 750 / document.documentElement.clientWidth`，差值 ≤ 3 设计 px 视为通过）。
+页面能在本地打开且用户要求 DOM 复核时，可在根元素加 `data-check-root`，在控制台对比 `screen-N.rects.json`（`K = 750 / document.documentElement.clientWidth`，差值 ≤ 3 设计 px 视为通过）。弹层/整图屏的 `rects.json` 首条（`idx: 0`）是全屏底图（规格表已标「勿渲染」的那张），比对 DOM 时跳过它，也别给页面写它。
